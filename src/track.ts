@@ -70,11 +70,28 @@ export const TRACK: readonly TrackItem[] = [
   c(27.8, 1), c(28.2, 1), c(28.6, 1), c(29.0, 1),
 ];
 
+/** Tutorial banners of the first round. */
 export const BANNERS: readonly Banner[] = [
   { t: 0.2, dur: 2.6, title: 'COLLECT THE CORES', sub: '+100 each · every core builds your streak', tone: 'core' },
   { t: 8.9, dur: 2.4, title: 'AVOID THE BARRIERS', sub: 'A crash resets your streak', tone: 'barrier' },
-  { t: 15.4, dur: 2.6, title: 'HIGH-VALUE CORE: +500', sub: 'A barrier sits right behind it. Grab it and get out, or let it pass.', tone: 'risk' },
+  // Starts after the last phase-2 wall (14.6 s) and is gone before the first pair arrives.
+  { t: 14.9, dur: 2.0, title: '+500 · BARRIER BEHIND IT', sub: 'Grab it and escape, or let it pass.', tone: 'risk' },
 ];
+
+/** The rematch skips the tutorials: one banner with the score to beat. */
+export function rematchBanners(target: number): Banner[] {
+  return [{ t: 0.2, dur: 2.6, title: `SAME TUNNEL · BEAT ${target}`, sub: 'Same cores, same barriers, same timing', tone: 'neutral' }];
+}
+
+/** Banners for a round: the tutorials in round 1, the target in the rematch. */
+export function bannersFor(round: number, previousScore: number | undefined): readonly Banner[] {
+  return round > 1 && previousScore !== undefined ? rematchBanners(previousScore) : BANNERS;
+}
+
+/** The banner visible at sim time `time`, if any. */
+export function bannerAt(banners: readonly Banner[], time: number): Banner | undefined {
+  return banners.find((b) => time >= b.t && time < b.t + b.dur);
+}
 
 /** High-value cores paired with the barrier that follows them in the same lane. */
 export function riskPairs(track: readonly TrackItem[] = TRACK): RiskPair[] {

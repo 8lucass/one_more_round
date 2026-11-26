@@ -3,16 +3,32 @@
 // title → countdown → playing → finishing → results
 //   results: "One more round" (once) → countdown (same course)
 //            "Finish" → closing → (next player) title
+//   playing/countdown: window loses focus or tab hidden → paused
+//            → ENTER / tap → countdown (3-2-1) → playing, same sim time
+//   Escape (any screen), or IDLE_RESET s without input in results, closing
+//   or paused → title for the next player (round 1, no results).
 
-import { COUNTDOWN, FINISH_HOLD, MAX_ROUNDS, SIM_DT } from './config.ts';
-import { H, Renderer, resultButtons, W, type Screen, type View } from './render.ts';
-import { Sim, type Stats } from './sim.ts';
-
-const INPUT_LOCK = 0.6; // seconds menus ignore input after appearing (anti-mash)
+import { Sfx } from './audio.ts';
+import {
+  COUNTDOWN,
+  FINISH_HOLD,
+  IDLE_RESET,
+  IDLE_WARNING,
+  INPUT_LOCK,
+  MAX_ROUNDS,
+  RESULTS_LOCK,
+  SIM_DT,
+} from './config.ts';
+import { DodgeTracker } from './feedback.ts';
+import { H, MUTE_BUTTON, Renderer, resultButtons, W, type Screen, type View } from './render.ts';
+import { Sim, type SimEvent, type Stats } from './sim.ts';
+import { bannerAt, bannersFor, type Banner } from './track.ts';
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
 const ctx = canvas.getContext('2d')!;
 const renderer = new Renderer();
+const sfx = new Sfx();
+const dodges = new DodgeTracker();
 
 let screen: Screen = 'title';
 let screenTime = 0;
@@ -21,32 +37,68 @@ let sim = new Sim();
 let results: Stats[] = [];
 let selected = 0;
 let countdown = COUNTDOWN;
+let countdownTick = 0; // last "3, 2, 1" number announced
 let acc = 0;
+let lastInput = performance.now();
+let pauseReason: 'blur' | 'hidden' | null = null;
+let pauses = 0;
+
+const media = (q: string) => (typeof window.matchMedia === 'function' ? window.matchMedia(q) : null);
+const reducedMotionQuery = media('(prefers-reduced-motion: reduce)');
+// Touch-first device → "Tap to play". Switches with the last input actually used.
+let touchUI = !!media('(hover: none) and (pointer: coarse)')?.matches;
 
 function go(next: Screen): void {
   screen = next;
   screenTime = 0;
+  lastInput = performance.now();
+}
+
+function lockFor(s: Screen): number {
+  if (s === 'results') return RESULTS_LOCK;
+  if (s === 'title' || s === 'closing' || s === 'paused') return INPUT_LOCK;
+  return 0;
+}
+
+const locked = () => screenTime < lockFor(screen);
+
+function startCountdown(): void {
+  countdown = COUNTDOWN;
+  countdownTick = 0;
+  acc = 0;
+  go('countdown');
 }
 
 function startRound(): void {
   sim = new Sim();
   renderer.reset(sim.lane);
-  countdown = COUNTDOWN;
-  acc = 0;
-  go('countdown');
+  dodges.reset();
+  startCountdown();
 }
 
 function newPlayer(): void {
   round = 1;
   results = [];
+  selected = 0;
+  pauseReason = null;
+  sim = new Sim();
+  renderer.reset(sim.lane);
+  dodges.reset();
   go('title');
 }
 
-const locked = () => (screen === 'title' || screen === 'results' || screen === 'closing') && screenTime < INPUT_LOCK;
+/** Freeze the round when nobody can be playing it (focus lost or tab hidden). */
+function pause(reason: 'blur' | 'hidden'): void {
+  if (screen !== 'playing' && screen !== 'countdown') return;
+  pauseReason = reason;
+  pauses++;
+  go('paused');
+}
 
 function confirmResults(): void {
   const buttons = resultButtons(round < MAX_ROUNDS);
   const b = buttons[Math.min(selected, buttons.length - 1)];
+  sfx.play('confirm');
   if (b.id === 'rematch') {
     round++;
     startRound();
@@ -57,24 +109,52 @@ function confirmResults(): void {
 
 function confirm(): void {
   if (locked()) return;
-  if (screen === 'title') startRound();
-  else if (screen === 'results') confirmResults();
-  else if (screen === 'closing') newPlayer();
+  if (screen === 'title') {
+    sfx.play('confirm');
+    startRound();
+  } else if (screen === 'results') confirmResults();
+  else if (screen === 'closing') {
+    sfx.play('confirm');
+    newPlayer();
+  } else if (screen === 'paused') {
+    sfx.play('confirm');
+    startCountdown(); // 3-2-1, then the round continues from the same sim time
+  }
+}
+
+/** Route freshly drained sim events to the visual and the audio feedback. */
+function feed(events: SimEvent[]): void {
+  if (events.length === 0) return;
+  const close = dodges.scan(events, sim.time);
+  renderer.handleEvents(events, sim.time, close);
+  sfx.handleEvents(events, close);
 }
 
 function steer(dir: -1 | 1): void {
   if (screen === 'playing') {
     sim.move(dir);
-    // Feedback for the press is shown on the very next frame.
-    renderer.handleEvents(sim.drainEvents());
+    // Feedback for the press is shown (and heard) on the very next frame.
+    feed(sim.drainEvents());
   } else if (screen === 'results' && !locked()) {
     const n = resultButtons(round < MAX_ROUNDS).length;
-    selected = Math.max(0, Math.min(n - 1, selected + dir));
+    const next = Math.max(0, Math.min(n - 1, selected + dir));
+    if (next !== selected) sfx.play('menuMove');
+    selected = next;
   }
 }
 
 window.addEventListener('keydown', (e) => {
   const k = e.key;
+  lastInput = performance.now();
+  if (k === 'Escape' || k === 'Esc') {
+    e.preventDefault();
+    if (!e.repeat) newPlayer();
+    return;
+  }
+  if (!e.repeat) {
+    touchUI = false;
+    sfx.unlock(); // a key press is a user gesture: audio may start now
+  }
   if (k === 'ArrowLeft' || k === 'a' || k === 'A') {
     e.preventDefault();
     if (!e.repeat) steer(-1); // one press = one lane; holding does nothing
@@ -83,23 +163,31 @@ window.addEventListener('keydown', (e) => {
     if (!e.repeat) steer(1);
   } else if (k === 'Enter' || k === ' ' || k === 'Spacebar') {
     e.preventDefault();
-    if (!e.repeat) confirm();
+    if (!e.repeat) confirm(); // holding ENTER never confirms twice
+  } else if (k === 'm' || k === 'M') {
+    if (!e.repeat) sfx.toggleMute();
   }
 });
 
 // Pointer / touch: menus use the drawn buttons, gameplay uses screen halves.
 canvas.addEventListener('pointerdown', (e) => {
+  lastInput = performance.now();
+  touchUI = e.pointerType !== 'mouse';
+  sfx.unlock();
   const rect = canvas.getBoundingClientRect();
   const { scale, ox, oy } = layout();
   const dpr = canvas.width / rect.width;
   const x = ((e.clientX - rect.left) * dpr - ox) / scale;
   const y = ((e.clientY - rect.top) * dpr - oy) / scale;
+  const inside = (b: { x: number; y: number; w: number; h: number }) => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
   if (screen === 'playing') {
     steer(x < W / 2 ? -1 : 1);
+  } else if (inside(MUTE_BUTTON)) {
+    sfx.toggleMute(); // touch has no M key
   } else if (screen === 'results') {
     if (locked()) return;
     const buttons = resultButtons(round < MAX_ROUNDS);
-    const i = buttons.findIndex((b) => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h);
+    const i = buttons.findIndex(inside);
     if (i >= 0) {
       selected = i;
       confirmResults();
@@ -107,6 +195,11 @@ canvas.addEventListener('pointerdown', (e) => {
   } else {
     confirm();
   }
+});
+
+window.addEventListener('blur', () => pause('blur'));
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') pause('hidden');
 });
 
 // ── Canvas sizing (letterboxed 16:9, crisp on HiDPI) ─────────────────
@@ -127,18 +220,30 @@ window.addEventListener('resize', resize);
 resize();
 
 // ── Main loop ────────────────────────────────────────────────────────
+const idleScreen = () => screen === 'results' || screen === 'closing' || screen === 'paused';
+/** Real seconds since the last input (counts while the tab was hidden, too). */
+const idleFor = () => (performance.now() - lastInput) / 1000;
+
 function update(dt: number): void {
   screenTime += dt;
   if (screen === 'countdown') {
     countdown -= dt;
-    if (countdown <= 0) go('playing');
+    const n = Math.max(1, Math.ceil(countdown / (COUNTDOWN / 3)));
+    if (countdown > 0 && n !== countdownTick) {
+      countdownTick = n;
+      sfx.play('tick');
+    }
+    if (countdown <= 0) {
+      sfx.play('go');
+      go('playing');
+    }
   } else if (screen === 'playing') {
     acc += dt;
     while (acc >= SIM_DT && !sim.finished) {
       sim.step(SIM_DT);
       acc -= SIM_DT;
     }
-    renderer.handleEvents(sim.drainEvents());
+    feed(sim.drainEvents());
     if (sim.finished) {
       results.push({ ...sim.stats });
       go('finishing');
@@ -149,19 +254,37 @@ function update(dt: number): void {
       go('results');
     }
   }
+  if (idleScreen() && idleFor() >= IDLE_RESET) newPlayer();
   renderer.update(dt, sim.lane);
 }
 
+function currentBanner(): Banner | undefined {
+  const banners = bannersFor(round, results[0]?.score);
+  if (screen === 'playing') return bannerAt(banners, sim.time);
+  // The rematch target is already on screen during its first countdown.
+  if (screen === 'countdown' && round > 1 && sim.time === 0) return banners[0];
+  return undefined;
+}
+
 function view(): View {
+  const lock = lockFor(screen);
   return {
     screen,
     screenTime,
     round,
     maxRounds: MAX_ROUNDS,
     countdown,
+    resuming: screen === 'countdown' && sim.time > 0,
     results,
     selected,
     inputLocked: locked(),
+    lockProgress: lock > 0 ? Math.min(1, screenTime / lock) : 1,
+    banner: currentBanner(),
+    idleLeft: idleScreen() ? Math.max(0, IDLE_RESET - idleFor()) : null,
+    idleWarning: IDLE_WARNING,
+    touch: touchUI,
+    reducedMotion: !!reducedMotionQuery?.matches,
+    muted: sfx.muted,
   };
 }
 
@@ -197,5 +320,16 @@ requestAnimationFrame(frame);
     selected,
     buttons: screen === 'results' ? resultButtons(round < MAX_ROUNDS).map((b) => b.id) : [],
     locked: locked(),
+    screenTime,
+    banner: currentBanner()?.title ?? null,
+    idleLeft: idleScreen() ? Math.max(0, IDLE_RESET - idleFor()) : null,
+    pauseReason,
+    pauses,
+    muted: sfx.muted,
+    audio: sfx.state,
+    sounds: { ...sfx.counts },
+    touch: touchUI,
+    reducedMotion: !!reducedMotionQuery?.matches,
+    shake: renderer.shakeAmp,
   }),
 };

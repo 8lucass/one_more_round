@@ -36,3 +36,23 @@ export const MAX_ROUNDS = 2;
 
 /** Simulation step (fixed, deterministic). */
 export const SIM_DT = 1 / 120;
+
+// ── Presentation only (never read by the simulation) ─────────────────
+
+/** Title and closing ignore input for this long after appearing (anti-mash). */
+export const INPUT_LOCK = 0.6;
+
+/** Results ignore input for this long, so mashing ENTER can't pick "One more round". */
+export const RESULTS_LOCK = 1.2;
+
+/** Results, closing or pause with no input for this long → back to the title. */
+export const IDLE_RESET = 45;
+
+/** The "back to the start in N" notice appears this many seconds before the reset. */
+export const IDLE_WARNING = 10;
+
+/** A barrier dodged by leaving its lane this soon before it arrives shows "CLOSE!". */
+export const CLOSE_DODGE = 0.35;
+
+/** Master volume of the synthesised sound effects (0–1). */
+export const VOLUME = 0.55;

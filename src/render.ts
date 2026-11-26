@@ -1,9 +1,9 @@
 // Canvas 2D renderer: 2.5D tunnel seen from behind the ship, plus HUD and
 // menu screens. Placeholder art: the goal is legibility, not final looks.
 
-import { BIG_CORE_POINTS, CORE_POINTS, FADE_IN, LOOKAHEAD, SPEED } from './config.ts';
+import { BIG_CORE_POINTS, COUNTDOWN, CORE_POINTS, FADE_IN, LOOKAHEAD, RUN_DURATION, SPEED } from './config.ts';
 import type { Sim, SimEvent, SimObject, Stats } from './sim.ts';
-import { BANNERS, type Banner } from './track.ts';
+import type { Banner } from './track.ts';
 
 // ── Logical screen + camera ──────────────────────────────────────────
 export const W = 960;
@@ -40,7 +40,18 @@ const COL = {
   ship: '#e9f1ff',
   text: '#f2f5ff',
   dim: '#8c95b8',
+  close: '#9dff8a',
+  missed: '#5d6482',
+  missedEdge: '#a3a9c2',
+  warn: '#ffd37a',
 };
+
+/** A collected core flies into the ship for this long (hides the early pickup). */
+const MAGNET_TIME = 0.07;
+/** A missed core turns grey and fades out over this long. */
+const MISS_FADE = 0.5;
+/** Vertical gap between stacked popups in the same lane (px). */
+const POPUP_ROW = 80;
 
 interface P {
   x: number;
@@ -72,7 +83,10 @@ const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 const easeOut = (t: number) => 1 - (1 - t) * (1 - t);
 
 // ── UI model shared with main.ts ─────────────────────────────────────
-export type Screen = 'title' | 'countdown' | 'playing' | 'finishing' | 'results' | 'closing';
+export type Screen = 'title' | 'countdown' | 'playing' | 'paused' | 'finishing' | 'results' | 'closing';
+
+/** Speaker icon (bottom right): shows the sound state; tapping it toggles mute. */
+export const MUTE_BUTTON = { x: W - 54, y: H - 44, w: 42, h: 34 };
 
 export interface Button {
   id: 'rematch' | 'finish';
@@ -100,19 +114,30 @@ export interface View {
   round: number;
   maxRounds: number;
   countdown: number; // seconds left in the countdown
+  resuming: boolean; // countdown after a pause (the round is half played)
   results: Stats[]; // finished rounds of the current player
   selected: number; // focused button index
   inputLocked: boolean;
+  lockProgress: number; // 0 → 1 while the screen ignores input
+  banner: Banner | undefined; // phase banner to show now
+  idleLeft: number | null; // seconds until the automatic return to the title
+  idleWarning: number; // show the notice when idleLeft drops below this
+  touch: boolean; // last input was touch: say "tap" instead of "press ENTER"
+  reducedMotion: boolean; // prefers-reduced-motion: no shake, no flicker, no pulsing
+  muted: boolean;
 }
 
 // ── Effects ──────────────────────────────────────────────────────────
 interface Popup {
+  kind: 'score' | 'crash' | 'close';
   text: string;
   sub: string;
   color: string;
   x: number;
   age: number;
   life: number;
+  row: number; // 0 = lowest; newer popups in the same lane push older ones up
+  shownRow: number; // animated towards `row`
 }
 
 interface Particle {
@@ -128,6 +153,8 @@ interface Particle {
 
 export class Renderer {
   shipX = 0; // visual lateral position (world units)
+  /** Camera shake amplitude used in the last drawn frame (px). Read by tests. */
+  shakeAmp = 0;
   private trail: number[] = [];
   private tilt = 0;
   private bump = 0; // edge bump offset
@@ -137,6 +164,7 @@ export class Renderer {
   private streakPulse = 0;
   private laneFlash = 0;
   private idleClock = 0;
+  private crashAt = -Infinity; // sim time of the last crash (ship flicker phase)
   private popups: Popup[] = [];
   private particles: Particle[] = [];
 
@@ -147,11 +175,13 @@ export class Renderer {
     this.bump = 0;
     this.shake = 0;
     this.flash = 0;
+    this.crashAt = -Infinity;
     this.popups = [];
     this.particles = [];
   }
 
-  handleEvents(events: SimEvent[]): void {
+  /** `time` = sim time of the drain; `close` = ids of barriers dodged at the last moment. */
+  handleEvents(events: SimEvent[], time: number, close: ReadonlySet<number>): void {
     for (const e of events) {
       switch (e.type) {
         case 'move':
@@ -163,15 +193,8 @@ export class Renderer {
         case 'collect': {
           const big = e.obj.kind === 'bigCore';
           // Only the latest score popup is shown, so quick pickups don't stack up.
-          this.popups = this.popups.filter((p) => p.color === COL.barrier);
-          this.popups.push({
-            text: `+${e.points}`,
-            sub: `STREAK ${e.streak}`,
-            color: big ? COL.big : COL.core,
-            x: laneX(e.obj.lane),
-            age: 0,
-            life: big ? 1.3 : 0.7,
-          });
+          this.popups = this.popups.filter((p) => p.kind !== 'score');
+          this.addPopup('score', `+${e.points}`, `STREAK ${e.streak}`, big ? COL.big : COL.core, laneX(e.obj.lane), big ? 1.3 : 0.7);
           this.burst(laneX(e.obj.lane), big ? COL.big : COL.core, big ? 36 : 18, big ? 1.4 : 1);
           this.streakPulse = 1;
           if (big) {
@@ -181,16 +204,30 @@ export class Renderer {
           break;
         }
         case 'crash':
-          this.popups.push({ text: 'CRASH!', sub: 'STREAK RESET', color: COL.barrier, x: laneX(e.obj.lane), age: 0, life: 1.2 });
+          this.crashAt = time;
+          this.addPopup('crash', 'CRASH!', 'STREAK RESET', COL.barrier, laneX(e.obj.lane), 1.2);
           this.burst(laneX(e.obj.lane), COL.barrier, 40, 1.6);
           this.shake = 1;
           this.flash = 0.55;
           this.flashColor = COL.barrier;
           break;
+        case 'dodge':
+          if (close.has(e.obj.id)) {
+            this.addPopup('close', 'CLOSE!', 'NICE DODGE', COL.close, laneX(e.obj.lane), 0.8);
+            this.burst(laneX(e.obj.lane), COL.close, 10, 0.7);
+          }
+          break;
         default:
           break;
       }
     }
+  }
+
+  /** New popups start at the bottom row; older ones in the same lane move up so both stay readable. */
+  private addPopup(kind: Popup['kind'], text: string, sub: string, color: string, x: number, life: number): void {
+    for (const p of this.popups) if (Math.abs(p.x - x) < 0.9) p.row++;
+    this.popups = this.popups.filter((p) => p.row < 3);
+    this.popups.push({ kind, text, sub, color, x, age: 0, life, row: 0, shownRow: 0 });
   }
 
   private burst(x: number, color: string, n: number, power: number): void {
@@ -228,7 +265,11 @@ export class Renderer {
     this.flash = Math.max(0, this.flash - dt * 1.6);
     this.streakPulse = Math.max(0, this.streakPulse - dt * 3);
     this.laneFlash = Math.max(0, this.laneFlash - dt * 4);
-    for (const p of this.popups) p.age += dt;
+    const kr = 1 - Math.exp(-dt / 0.06);
+    for (const p of this.popups) {
+      p.age += dt;
+      p.shownRow += (p.row - p.shownRow) * kr;
+    }
     this.popups = this.popups.filter((p) => p.age < p.life);
     for (const p of this.particles) {
       p.age += dt;
@@ -245,12 +286,15 @@ export class Renderer {
     ctx.fillStyle = COL.bg;
     ctx.fillRect(0, 0, W, H);
 
-    const playingLike = view.screen === 'playing' || view.screen === 'finishing' || view.screen === 'countdown';
+    const playingLike =
+      view.screen === 'playing' || view.screen === 'finishing' || view.screen === 'countdown' || view.screen === 'paused';
     const time = sim.time;
     const dist = playingLike || view.screen === 'results' ? time * SPEED : this.idleClock * SPEED * 0.6;
 
-    if (this.shake > 0) {
+    this.shakeAmp = 0;
+    if (this.shake > 0 && !view.reducedMotion) {
       const a = this.shake * this.shake * 14;
+      this.shakeAmp = a;
       ctx.translate((Math.random() - 0.5) * a, (Math.random() - 0.5) * a);
     }
 
@@ -260,9 +304,12 @@ export class Renderer {
       this.drawLaneHighlight(ctx, sim.lane);
       this.drawFloorWarnings(ctx, sim);
       const objs = this.visibleObjects(sim);
-      for (const o of objs) if ((o.t - time) * SPEED > 0.3) this.drawObject(ctx, o, time);
-      this.drawShip(ctx, sim);
-      for (const o of objs) if ((o.t - time) * SPEED <= 0.3) this.drawObject(ctx, o, time);
+      // Behind the ship: everything still ahead of it, and the debris of a hit barrier
+      // (the ship must stay visible through its own crash).
+      const inFront = (o: SimObject) => o.state !== 'hit' && (o.t - time) * SPEED <= 0.3;
+      for (const o of objs) if (!inFront(o)) this.drawObject(ctx, o, time);
+      this.drawShip(ctx, sim, view.reducedMotion);
+      for (const o of objs) if (inFront(o)) this.drawObject(ctx, o, time);
       this.drawParticles(ctx);
       this.drawPopups(ctx);
     }
@@ -279,15 +326,20 @@ export class Renderer {
       ctx.restore();
     }
 
-    if (view.screen === 'playing' || view.screen === 'finishing' || view.screen === 'countdown') {
+    if (playingLike) {
       this.drawHud(ctx, sim, view);
-      if (view.screen === 'playing') this.drawBanner(ctx, time);
+      if (view.banner && (view.screen === 'playing' || view.screen === 'countdown')) {
+        this.drawBanner(ctx, view.banner, view.screen === 'playing' ? time : null);
+      }
     }
     if (view.screen === 'countdown') this.drawCountdown(ctx, view);
+    if (view.screen === 'paused') this.drawPaused(ctx, view);
     if (view.screen === 'finishing') this.drawFinish(ctx, view);
     if (view.screen === 'title') this.drawTitle(ctx, view);
     if (view.screen === 'results') this.drawResults(ctx, view);
     if (view.screen === 'closing') this.drawClosing(ctx, view);
+    if (view.idleLeft !== null && view.idleLeft <= view.idleWarning) this.drawIdleWarning(ctx, view);
+    this.drawSoundIcon(ctx, view);
   }
 
   // ── Tunnel ─────────────────────────────────────────────────────────
@@ -416,9 +468,17 @@ export class Renderer {
     const out: SimObject[] = [];
     for (const o of sim.objects) {
       const z = (o.t - sim.time) * SPEED;
+      const age = sim.time - o.resolvedAt;
+      if (o.state === 'collected') {
+        if (age < MAGNET_TIME) out.push(o);
+        continue;
+      }
+      if (o.state === 'missed') {
+        if (age < MISS_FADE) out.push(o);
+        continue;
+      }
       if (z > LOOKAHEAD * SPEED || z < Z_NEAR + 0.2) continue;
-      if (o.state === 'collected') continue;
-      if (o.state === 'hit' && sim.time - o.resolvedAt > 0.45) continue;
+      if (o.state === 'hit' && age > 0.45) continue;
       if (o.state !== 'hit' && z < -1) continue;
       out.push(o);
     }
@@ -426,9 +486,15 @@ export class Renderer {
   }
 
   private drawObject(ctx: CanvasRenderingContext2D, o: SimObject, time: number): void {
+    if (o.kind !== 'barrier' && (o.state === 'collected' || o.state === 'missed')) {
+      this.drawResolvedCore(ctx, o, time);
+      return;
+    }
     // A hit barrier stays where it broke (just ahead of the ship) while it shatters.
     const z = o.state === 'hit' ? 0.5 : (o.t - time) * SPEED;
-    const alpha = fog(z) * (z < 0 ? clamp01(1 + z) : 1);
+    // Cores keep full opacity as they pass the ship: a missed core must still be seen.
+    const fadePast = o.kind === 'barrier' && z < 0 ? clamp01(1 + z) : 1;
+    const alpha = fog(z) * fadePast;
     if (alpha <= 0) return;
     ctx.save();
     ctx.globalAlpha = alpha;
@@ -437,13 +503,41 @@ export class Renderer {
     ctx.restore();
   }
 
-  private drawCore(ctx: CanvasRenderingContext2D, o: SimObject, z: number, time: number): void {
+  /** Collected: flies into the ship. Missed: turns grey where it passed and fades. */
+  private drawResolvedCore(ctx: CanvasRenderingContext2D, o: SimObject, time: number): void {
+    const z0 = (o.t - o.resolvedAt) * SPEED;
+    const x0 = laneX(o.lane);
+    ctx.save();
+    if (o.state === 'collected') {
+      const k = easeOut(clamp01((time - o.resolvedAt) / MAGNET_TIME));
+      ctx.globalAlpha = 1 - k * 0.6;
+      this.drawCore(ctx, o, z0 * (1 - k), time, {
+        x: x0 + (this.shipX - x0) * k,
+        y: CORE_Y + (0.2 - CORE_Y) * k,
+        scale: 1 - k * 0.6,
+      });
+    } else {
+      const k = clamp01((time - o.resolvedAt) / MISS_FADE);
+      ctx.globalAlpha = 1 - k;
+      this.drawCore(ctx, o, z0, time, { y: CORE_Y - k * 0.2, gray: true });
+    }
+    ctx.restore();
+  }
+
+  private drawCore(
+    ctx: CanvasRenderingContext2D,
+    o: SimObject,
+    z: number,
+    time: number,
+    opt: { x?: number; y?: number; scale?: number; gray?: boolean } = {},
+  ): void {
     const big = o.kind === 'bigCore';
-    const x = laneX(o.lane);
-    const bob = Math.sin(time * 5 + o.id) * 0.04;
-    const c = proj(x, CORE_Y + bob, z);
-    const r = (big ? 0.2 : 0.15) * LANE_PX * c.s;
-    const color = big ? COL.big : COL.core;
+    const gray = !!opt.gray;
+    const x = opt.x ?? laneX(o.lane);
+    const bob = gray ? 0 : Math.sin(time * 5 + o.id) * 0.04;
+    const c = proj(x, (opt.y ?? CORE_Y) + bob, z);
+    const r = (big ? 0.2 : 0.15) * LANE_PX * c.s * (opt.scale ?? 1);
+    const color = gray ? COL.missed : big ? COL.big : COL.core;
 
     // Shadow on the floor.
     const sh = proj(x, 0, z);
@@ -452,19 +546,21 @@ export class Renderer {
     ctx.ellipse(sh.x, sh.y, r * 0.9, r * 0.25, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    // Glow.
-    const g = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, r * 1.9);
-    g.addColorStop(0, big ? 'rgba(255,201,51,0.65)' : 'rgba(71,231,255,0.55)');
-    g.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g;
-    ctx.beginPath();
-    ctx.arc(c.x, c.y, r * 1.9, 0, Math.PI * 2);
-    ctx.fill();
+    // Glow (a missed core has lost it).
+    if (!gray) {
+      const g = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, r * 1.9);
+      g.addColorStop(0, big ? 'rgba(255,201,51,0.65)' : 'rgba(71,231,255,0.55)');
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, r * 1.9, 0, Math.PI * 2);
+      ctx.fill();
+    }
 
     // Body: diamond (normal) or 8-point star (high value).
-    const rot = time * (big ? 2.2 : 3) + o.id;
+    const rot = (gray ? o.resolvedAt : time) * (big ? 2.2 : 3) + o.id;
     ctx.fillStyle = color;
-    ctx.strokeStyle = '#ffffff';
+    ctx.strokeStyle = gray ? COL.missedEdge : '#ffffff';
     ctx.lineWidth = Math.max(1, 2.5 * c.s);
     ctx.beginPath();
     const pts = big ? 16 : 4;
@@ -479,12 +575,12 @@ export class Renderer {
     ctx.closePath();
     ctx.fill();
     ctx.stroke();
-    ctx.fillStyle = '#ffffff';
+    ctx.fillStyle = gray ? COL.missedEdge : '#ffffff';
     ctx.beginPath();
     ctx.arc(c.x, c.y, r * 0.28, 0, Math.PI * 2);
     ctx.fill();
 
-    if (big) {
+    if (big && !gray && o.state === 'pending') {
       // Pulsing ring + value tag so it reads as "special" from far away.
       const pulse = (time * 1.8) % 1;
       ctx.strokeStyle = COL.big;
@@ -582,8 +678,15 @@ export class Renderer {
   }
 
   // ── Ship ───────────────────────────────────────────────────────────
-  private drawShip(ctx: CanvasRenderingContext2D, sim: Sim): void {
-    const blink = sim.invulnerable && Math.floor(sim.time * 12) % 3 === 0;
+  private drawShip(ctx: CanvasRenderingContext2D, sim: Sim, reducedMotion: boolean): void {
+    // While ghosting after a crash the ship dims (steady with reduced motion,
+    // a 4 Hz flicker otherwise) but never disappears. The flicker starts at the
+    // crash with the ship fully drawn.
+    let alpha = 1;
+    if (sim.invulnerable) {
+      if (reducedMotion) alpha = 0.7;
+      else alpha = Math.floor((sim.time - this.crashAt) * 12) % 3 === 2 ? 0.4 : 1;
+    }
     const xs = this.shipX + this.bump;
 
     // Motion ghosts while switching lanes.
@@ -592,7 +695,7 @@ export class Renderer {
       if (Math.abs(gx - xs) < 0.06) continue;
       this.drawShipShape(ctx, gx, 0.18 - i * 0.02, true);
     }
-    if (!blink) this.drawShipShape(ctx, xs, 1, false);
+    this.drawShipShape(ctx, xs, alpha, false);
   }
 
   private drawShipShape(ctx: CanvasRenderingContext2D, x: number, alpha: number, ghost: boolean): void {
@@ -676,10 +779,12 @@ export class Renderer {
   }
 
   private drawPopups(ctx: CanvasRenderingContext2D): void {
-    for (const p of this.popups) {
+    // Crash messages are drawn last, on top of any bonus text.
+    const order = [...this.popups].sort((a, b) => Number(a.kind === 'crash') - Number(b.kind === 'crash'));
+    for (const p of order) {
       const t = p.age / p.life;
       const pos = proj(p.x, 0.9, 0);
-      const y = pos.y - 40 - easeOut(t) * 50;
+      const y = pos.y - 40 - easeOut(t) * 50 - p.shownRow * POPUP_ROW;
       ctx.globalAlpha = 1 - t * t;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
@@ -734,7 +839,7 @@ export class Renderer {
     // Course progress.
     const bw = 300;
     const bx = CX - bw / 2;
-    const progress = clamp01(sim.time / 30);
+    const progress = clamp01(sim.time / RUN_DURATION);
     ctx.fillStyle = 'rgba(255,255,255,0.15)';
     roundRect(ctx, bx, 22, bw, 8, 4);
     ctx.fill();
@@ -749,11 +854,10 @@ export class Renderer {
     ctx.restore();
   }
 
-  private drawBanner(ctx: CanvasRenderingContext2D, time: number): void {
-    const b: Banner | undefined = BANNERS.find((x) => time >= x.t && time < x.t + x.dur);
-    if (!b) return;
-    const t = (time - b.t) / b.dur;
-    const a = Math.min(1, t * 8, (1 - t) * 6);
+  /** `time` null = static (shown during the countdown, before the round moves). */
+  private drawBanner(ctx: CanvasRenderingContext2D, b: Banner, time: number | null): void {
+    const t = time === null ? 0.5 : (time - b.t) / b.dur;
+    const a = Math.max(0, Math.min(1, t * 8, (1 - t) * 6));
     const color = b.tone === 'barrier' ? COL.barrier : b.tone === 'risk' ? COL.big : b.tone === 'core' ? COL.core : COL.text;
     ctx.save();
     ctx.globalAlpha = a;
@@ -775,11 +879,17 @@ export class Renderer {
   }
 
   private drawCountdown(ctx: CanvasRenderingContext2D, view: View): void {
-    const n = Math.ceil(view.countdown / (2.4 / 3));
-    const frac = (view.countdown % 0.8) / 0.8;
+    const step = COUNTDOWN / 3;
+    const n = Math.ceil(view.countdown / step);
+    const frac = (Math.max(0, view.countdown) % step) / step;
     ctx.save();
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
+    if (view.resuming) {
+      ctx.fillStyle = COL.laneHi;
+      ctx.font = `800 22px ${FONT}`;
+      ctx.fillText('GET READY · THE ROUND CONTINUES', CX, 128);
+    }
     ctx.globalAlpha = 0.4 + frac * 0.6;
     ctx.fillStyle = COL.text;
     ctx.font = `900 ${90 + (1 - frac) * 30}px ${FONT}`;
@@ -846,11 +956,87 @@ export class Renderer {
       ctx.fillText(sub, x, y + 62);
     });
 
-    const blink = 0.55 + 0.45 * Math.sin(view.screenTime * 4);
-    ctx.globalAlpha = view.inputLocked ? 0.3 : blink;
-    ctx.fillStyle = COL.laneHi;
-    ctx.font = `800 24px ${FONT}`;
-    ctx.fillText('Press ENTER or SPACE to start', CX, 460);
+    drawPrompt(ctx, view, view.touch ? 'Tap to play' : 'Press ENTER or SPACE to play', 460);
+    ctx.restore();
+  }
+
+  private drawPaused(ctx: CanvasRenderingContext2D, view: View): void {
+    this.dim(ctx, 0.75);
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = COL.text;
+    ctx.font = `900 64px ${FONT}`;
+    ctx.fillText('PAUSED', CX, 196);
+    ctx.fillStyle = COL.dim;
+    ctx.font = `600 18px ${FONT}`;
+    ctx.fillText('The game window lost focus, so the round is frozen.', CX, 246);
+    drawPrompt(ctx, view, view.touch ? 'Tap to resume' : 'Press ENTER or SPACE to resume', 320);
+    ctx.fillStyle = COL.dim;
+    ctx.font = `500 15px ${FONT}`;
+    ctx.fillText('3 · 2 · 1, then the round continues where it stopped', CX, 372);
+    ctx.restore();
+  }
+
+  private drawIdleWarning(ctx: CanvasRenderingContext2D, view: View): void {
+    const left = Math.max(1, Math.ceil(view.idleLeft ?? 0));
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const y = view.screen === 'paused' ? 420 : 26;
+    ctx.fillStyle = 'rgba(4,5,13,0.75)';
+    roundRect(ctx, CX - 210, y - 16, 420, 32, 16);
+    ctx.fill();
+    ctx.fillStyle = COL.warn;
+    ctx.font = `700 16px ${FONT}`;
+    ctx.fillText(`No input · back to the start in ${left} s`, CX, y + 1);
+    ctx.restore();
+  }
+
+  /** Speaker icon: dim on menus, highlighted (with a cross) whenever sound is off. */
+  private drawSoundIcon(ctx: CanvasRenderingContext2D, view: View): void {
+    const menus = view.screen !== 'playing' && view.screen !== 'countdown' && view.screen !== 'finishing';
+    if (!view.muted && !menus) return;
+    const b = MUTE_BUTTON;
+    const x = b.x + 8;
+    const y = b.y + b.h / 2;
+    ctx.save();
+    ctx.globalAlpha = view.muted ? 0.95 : 0.55;
+    ctx.fillStyle = 'rgba(4,5,13,0.6)';
+    roundRect(ctx, b.x, b.y, b.w, b.h, 8);
+    ctx.fill();
+    ctx.fillStyle = COL.text;
+    ctx.strokeStyle = COL.text;
+    ctx.lineWidth = 2;
+    // Speaker body.
+    ctx.beginPath();
+    ctx.moveTo(x, y - 5);
+    ctx.lineTo(x + 6, y - 5);
+    ctx.lineTo(x + 13, y - 11);
+    ctx.lineTo(x + 13, y + 11);
+    ctx.lineTo(x + 6, y + 5);
+    ctx.lineTo(x, y + 5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.beginPath();
+    if (view.muted) {
+      ctx.strokeStyle = COL.barrier;
+      ctx.lineWidth = 3;
+      ctx.moveTo(x + 18, y - 7);
+      ctx.lineTo(x + 28, y + 7);
+      ctx.moveTo(x + 28, y - 7);
+      ctx.lineTo(x + 18, y + 7);
+    } else {
+      ctx.arc(x + 14, y, 7, -0.9, 0.9);
+      ctx.moveTo(x + 14 + 12 * Math.cos(-0.9), y + 12 * Math.sin(-0.9));
+      ctx.arc(x + 14, y, 12, -0.9, 0.9);
+    }
+    ctx.stroke();
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.font = `700 13px ${FONT}`;
+    ctx.fillStyle = view.muted ? COL.text : COL.dim;
+    ctx.fillText(view.muted ? (view.touch ? 'SOUND OFF' : 'SOUND OFF · M') : view.touch ? '' : 'M', b.x - 8, y);
     ctx.restore();
   }
 
@@ -872,18 +1058,24 @@ export class Renderer {
     ctx.font = `900 72px ${FONT}`;
     ctx.fillText(String(s.score), CX, 160);
 
+    const canRematch = view.round < view.maxRounds;
     const prev = view.results.length > 1 ? view.results[view.results.length - 2] : undefined;
     if (prev) {
       const diff = s.score - prev.score;
       ctx.font = `700 17px ${FONT}`;
       ctx.fillStyle = diff >= 0 ? COL.core : COL.dim;
       ctx.fillText(`Round 1: ${prev.score}   →   Round 2: ${s.score}  (${diff >= 0 ? '+' : ''}${diff})`, CX, 208);
+    } else if (canRematch) {
+      ctx.font = `800 20px ${FONT}`;
+      ctx.fillStyle = COL.laneHi;
+      ctx.fillText(`Same tunnel. Beat ${s.score}?`, CX, 208);
     }
 
+    // Normal and +500 cores are counted separately (no double counting).
     const rows: [string, string][] = [
       ['Best streak', String(s.bestStreak)],
-      ['Cores collected', `${s.cores} / ${s.coresTotal}`],
-      ['High-value cores', `${s.bigCores} / ${s.bigCoresTotal}`],
+      ['Cores', `${s.cores - s.bigCores} / ${s.coresTotal - s.bigCoresTotal}`],
+      [`+${BIG_CORE_POINTS} cores`, `${s.bigCores} / ${s.bigCoresTotal}`],
       ['Crashes', String(s.crashes)],
     ];
     rows.forEach(([k, v], i) => {
@@ -898,13 +1090,32 @@ export class Renderer {
       ctx.fillText(v, CX + 14, y);
     });
 
-    const buttons = resultButtons(view.round < view.maxRounds);
+    const buttons = resultButtons(canRematch);
     buttons.forEach((b, i) => drawButton(ctx, b, i === view.selected, view.inputLocked));
+    // Visible lock: a bar fills under the buttons while they ignore input.
+    if (view.inputLocked) {
+      const x0 = buttons[0].x;
+      const x1 = buttons[buttons.length - 1].x + buttons[buttons.length - 1].w;
+      const y = buttons[0].y + buttons[0].h + 8;
+      ctx.fillStyle = 'rgba(255,255,255,0.12)';
+      roundRect(ctx, x0, y, x1 - x0, 4, 2);
+      ctx.fill();
+      ctx.fillStyle = COL.dim;
+      roundRect(ctx, x0, y, Math.max(4, (x1 - x0) * view.lockProgress), 4, 2);
+      ctx.fill();
+    }
     ctx.textAlign = 'center';
     ctx.fillStyle = COL.dim;
     ctx.font = `500 14px ${FONT}`;
-    const hint = buttons.length > 1 ? '← → choose · ENTER confirm' : 'This was your last round · ENTER to finish';
-    ctx.fillText(hint, CX, 500);
+    const hint =
+      buttons.length > 1
+        ? view.touch
+          ? 'Tap a button'
+          : '← → choose · ENTER confirm'
+        : view.touch
+          ? 'This was your last round · tap Finish'
+          : 'This was your last round · ENTER to finish';
+    ctx.fillText(hint, CX, 502);
     ctx.restore();
   }
 
@@ -926,13 +1137,32 @@ export class Renderer {
     ctx.fillStyle = COL.dim;
     ctx.font = `italic 500 15px ${FONT}`;
     ctx.fillText('[ Provisional ending: the closing content arrives in the next iteration ]', CX, 270);
-    const blink = 0.55 + 0.45 * Math.sin(view.screenTime * 4);
-    ctx.globalAlpha = view.inputLocked ? 0.3 : blink;
-    ctx.fillStyle = COL.laneHi;
-    ctx.font = `800 24px ${FONT}`;
-    ctx.fillText('Next player: press ENTER or SPACE', CX, 400);
+    drawPrompt(ctx, view, view.touch ? 'Next player: tap to continue' : 'Next player: press ENTER or SPACE', 400);
     ctx.restore();
   }
+}
+
+/**
+ * Call to action on a pill. Pulses gently between 0.7 and 1.0 opacity (steady
+ * with reduced motion); stays faint while the screen still ignores input.
+ */
+function drawPrompt(ctx: CanvasRenderingContext2D, view: View, text: string, y: number): void {
+  ctx.save();
+  const pulse = view.reducedMotion ? 1 : 0.85 + 0.15 * Math.sin(view.screenTime * 4);
+  ctx.globalAlpha = view.inputLocked ? 0.35 : pulse;
+  ctx.font = `800 24px ${FONT}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const w = ctx.measureText(text).width + 56;
+  roundRect(ctx, CX - w / 2, y - 26, w, 52, 26);
+  ctx.fillStyle = 'rgba(71,231,255,0.12)';
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = COL.laneHi;
+  ctx.stroke();
+  ctx.fillStyle = COL.laneHi;
+  ctx.fillText(text, CX, y + 1);
+  ctx.restore();
 }
 
 // ── Small drawing helpers ────────────────────────────────────────────
