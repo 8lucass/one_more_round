@@ -1,8 +1,10 @@
 // App shell: screens, input, fixed-step loop.
 //
 // title → countdown → playing → finishing → results
-//   results: "One more round" (once) → countdown (same course)
+//   results: "One more round" (once) → countdown (same course, clock +30 min)
 //            "Finish" → closing → (next player) title
+//   closing: summary → 3 cards → end page, one page per ENTER / → / tap
+//            (← goes back); ENTER on the end page → title for the next player
 //   playing/countdown: window loses focus or tab hidden → paused
 //            → ENTER / tap → countdown (3-2-1) → playing, same sim time
 //   Escape (any screen), or IDLE_RESET s without input in results, closing
@@ -22,6 +24,7 @@ import {
 import { DodgeTracker } from './feedback.ts';
 import { H, MUTE_BUTTON, Renderer, resultButtons, W, type Screen, type View } from './render.ts';
 import { Sim, type SimEvent, type Stats } from './sim.ts';
+import { clockAt, closingFor, closingPageCount, type Closing } from './story.ts';
 import { bannerAt, bannersFor, type Banner } from './track.ts';
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
@@ -42,6 +45,8 @@ let acc = 0;
 let lastInput = performance.now();
 let pauseReason: 'blur' | 'hidden' | null = null;
 let pauses = 0;
+let closing: Closing | null = null;
+let closingPage = 0;
 
 const media = (q: string) => (typeof window.matchMedia === 'function' ? window.matchMedia(q) : null);
 const reducedMotionQuery = media('(prefers-reduced-motion: reduce)');
@@ -81,6 +86,8 @@ function newPlayer(): void {
   results = [];
   selected = 0;
   pauseReason = null;
+  closing = null;
+  closingPage = 0;
   sim = new Sim();
   renderer.reset(sim.lane);
   dodges.reset();
@@ -100,11 +107,23 @@ function confirmResults(): void {
   const b = buttons[Math.min(selected, buttons.length - 1)];
   sfx.play('confirm');
   if (b.id === 'rematch') {
-    round++;
+    round++; // the fictional clock moves 30 min later only here
     startRound();
   } else {
+    closing = closingFor(results);
+    closingPage = 0;
     go('closing');
   }
+}
+
+/** Closing pages: forward (ENTER, →, tap) or back (←). Each new page re-arms the input lock. */
+function turnPage(dir: -1 | 1): void {
+  if (!closing) return;
+  const next = closingPage + dir;
+  if (next < 0 || next >= closingPageCount(closing)) return;
+  closingPage = next;
+  sfx.play(dir > 0 ? 'confirm' : 'menuMove');
+  go('closing');
 }
 
 function confirm(): void {
@@ -114,8 +133,11 @@ function confirm(): void {
     startRound();
   } else if (screen === 'results') confirmResults();
   else if (screen === 'closing') {
-    sfx.play('confirm');
-    newPlayer();
+    if (closing && closingPage < closingPageCount(closing) - 1) turnPage(1);
+    else {
+      sfx.play('confirm');
+      newPlayer();
+    }
   } else if (screen === 'paused') {
     sfx.play('confirm');
     startCountdown(); // 3-2-1, then the round continues from the same sim time
@@ -140,6 +162,9 @@ function steer(dir: -1 | 1): void {
     const next = Math.max(0, Math.min(n - 1, selected + dir));
     if (next !== selected) sfx.play('menuMove');
     selected = next;
+  } else if (screen === 'closing' && !locked() && closing) {
+    // → never leaves the last page: only ENTER / tap starts the next player.
+    if (dir < 0 || closingPage < closingPageCount(closing) - 1) turnPage(dir);
   }
 }
 
@@ -285,6 +310,10 @@ function view(): View {
     touch: touchUI,
     reducedMotion: !!reducedMotionQuery?.matches,
     muted: sfx.muted,
+    clock: clockAt(round),
+    nextClock: clockAt(round + 1),
+    closing,
+    closingPage,
   };
 }
 
@@ -319,6 +348,19 @@ requestAnimationFrame(frame);
     results: results.map((r) => ({ ...r })),
     selected,
     buttons: screen === 'results' ? resultButtons(round < MAX_ROUNDS).map((b) => b.id) : [],
+    clock: clockAt(round),
+    pendingBonus: sim.pendingBonus,
+    closing:
+      screen === 'closing' && closing
+        ? {
+            page: closingPage,
+            pages: closingPageCount(closing),
+            card: closingPage === 0 ? 'summary' : closing.cards[closingPage - 1]?.tag ?? 'end',
+            finalClock: closing.finalClock,
+            headline: closing.headline,
+            you: closing.cards[closingPage - 1]?.you ?? null,
+          }
+        : null,
     locked: locked(),
     screenTime,
     banner: currentBanner()?.title ?? null,

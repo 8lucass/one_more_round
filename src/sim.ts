@@ -24,7 +24,12 @@ export interface SimObject {
 }
 
 export type SimEvent =
+  /** `points` = what reached the score right now (0 for a +500 that still has to be banked). */
   | { type: 'collect'; obj: SimObject; points: number; streak: number }
+  /** A +500 core whose barrier was passed without crashing: its points reach the score. */
+  | { type: 'bank'; obj: SimObject; points: number }
+  /** A +500 core whose barrier was hit: its points are lost. */
+  | { type: 'lose'; obj: SimObject; points: number }
   | { type: 'crash'; obj: SimObject }
   | { type: 'dodge'; obj: SimObject }
   | { type: 'miss'; obj: SimObject }
@@ -38,7 +43,12 @@ export interface Stats {
   bestStreak: number;
   cores: number;
   coresTotal: number;
+  /** +500 cores grabbed (banked, lost or still pending). */
   bigCores: number;
+  /** +500 cores whose barrier was then passed cleanly: their points count. */
+  bigBanked: number;
+  /** +500 cores grabbed and then lost by crashing into their barrier. */
+  bigLost: number;
   bigCoresTotal: number;
   crashes: number;
   dodges: number;
@@ -53,6 +63,10 @@ export class Sim {
   readonly stats: Stats;
   /** Events since the last drain; the renderer turns them into feedback. */
   events: SimEvent[] = [];
+  /** "Bank on clear": each +500 core → the barrier that follows it in the same lane. */
+  private readonly guardOf = new Map<number, SimObject>();
+  /** +500 cores grabbed whose barrier has not been resolved yet. */
+  private readonly pending = new Set<SimObject>();
 
   constructor(track: readonly TrackItem[] = TRACK) {
     this.objects = track
@@ -65,10 +79,22 @@ export class Sim {
       cores: 0,
       coresTotal: track.filter((o) => o.kind !== 'barrier').length,
       bigCores: 0,
+      bigBanked: 0,
+      bigLost: 0,
       bigCoresTotal: track.filter((o) => o.kind === 'bigCore').length,
       crashes: 0,
       dodges: 0,
     };
+    for (const core of this.objects) {
+      if (core.kind !== 'bigCore') continue;
+      const guard = this.objects.find((o) => o.kind === 'barrier' && o.lane === core.lane && o.t > core.t);
+      if (guard) this.guardOf.set(core.id, guard);
+    }
+  }
+
+  /** Points of the +500 cores grabbed but not yet banked (shown as "+500?"). */
+  get pendingBonus(): number {
+    return this.pending.size * BIG_CORE_POINTS;
   }
 
   /** One lane per call. Returns false (and emits a bump) at the edge. */
@@ -114,6 +140,7 @@ export class Sim {
         this.stats.dodges++;
         this.events.push({ type: 'dodge', obj: o });
       }
+      this.settleBonuses();
     }
 
     this.resolveCores(now);
@@ -129,20 +156,44 @@ export class Sim {
       if (o.state !== 'pending' || o.kind === 'barrier') continue;
       if (o.t - CORE_WINDOW > now) break;
       if (o.lane === this.lane && Math.abs(now - o.t) <= CORE_WINDOW) {
-        const points = o.kind === 'bigCore' ? BIG_CORE_POINTS : CORE_POINTS;
+        const big = o.kind === 'bigCore';
         o.state = 'collected';
         o.resolvedAt = now;
         const s = this.stats;
+        // A +500 only counts once its barrier is passed without a crash (bank on clear).
+        const points = big ? 0 : CORE_POINTS;
         s.score += points;
         s.streak++;
         s.bestStreak = Math.max(s.bestStreak, s.streak);
         s.cores++;
-        if (o.kind === 'bigCore') s.bigCores++;
+        if (big) {
+          s.bigCores++;
+          this.pending.add(o);
+        }
         this.events.push({ type: 'collect', obj: o, points, streak: s.streak });
+        if (big) this.settleBonuses();
       } else if (now > o.t + CORE_WINDOW) {
         o.state = 'missed';
         o.resolvedAt = now;
         this.events.push({ type: 'miss', obj: o });
+      }
+    }
+  }
+
+  /** Banks or loses every grabbed +500 whose barrier has been resolved (or that has none). */
+  private settleBonuses(): void {
+    for (const core of this.pending) {
+      const guard = this.guardOf.get(core.id);
+      if (guard && guard.state === 'pending') continue;
+      this.pending.delete(core);
+      const s = this.stats;
+      if (guard && guard.state === 'hit') {
+        s.bigLost++;
+        this.events.push({ type: 'lose', obj: core, points: BIG_CORE_POINTS });
+      } else {
+        s.bigBanked++;
+        s.score += BIG_CORE_POINTS;
+        this.events.push({ type: 'bank', obj: core, points: BIG_CORE_POINTS });
       }
     }
   }

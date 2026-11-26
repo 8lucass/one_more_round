@@ -56,3 +56,8 @@ export const CLOSE_DODGE = 0.35;
 
 /** Master volume of the synthesised sound effects (0–1). */
 export const VOLUME = 0.55;
+
+/** Fictional story clock (presentation only): round 1 is played at 10:30 PM… */
+export const CLOCK_START = 22 * 60 + 30; // minutes after midnight
+/** …and choosing "One more round" moves it this many minutes later. */
+export const CLOCK_STEP = 30;

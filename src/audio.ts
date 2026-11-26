@@ -13,6 +13,8 @@ export type SoundId =
   | 'bump'
   | 'collect'
   | 'big'
+  | 'bank'
+  | 'lose'
   | 'crash'
   | 'close'
   | 'miss'
@@ -123,6 +125,12 @@ export class Sfx {
         case 'crash':
           this.play('crash');
           break;
+        case 'bank':
+          this.play('bank');
+          break;
+        case 'lose':
+          this.play('lose');
+          break;
         case 'dodge':
           if (close.has(e.obj.id) && !closePlayed) {
             this.play('close', e.obj.lane - 1);
@@ -178,6 +186,17 @@ export class Sfx {
           this.tone({ wave: 'sine', f0: f * 2, dur: 0.2, gain: 0.08, delay: i * 0.045 });
         });
         this.noise({ dur: 0.35, gain: 0.06, filter: 'highpass', f0: 6000, delay: 0.05 });
+        break;
+      case 'bank':
+        // The +500 is safe: warm major chord that rings out, with a shimmer.
+        [523, 659, 784, 1047].forEach((f) => this.tone({ wave: 'triangle', f0: f, dur: 0.6, gain: 0.13 }));
+        this.tone({ wave: 'sine', f0: 2093, dur: 0.45, gain: 0.06, delay: 0.04 });
+        this.noise({ dur: 0.3, gain: 0.05, filter: 'highpass', f0: 7000, delay: 0.03 });
+        break;
+      case 'lose':
+        // The +500 is gone: two falling tones after the crash thud ("wah-wah").
+        this.tone({ wave: 'square', f0: 392, f1: 349, dur: 0.16, gain: 0.1, delay: 0.14 });
+        this.tone({ wave: 'square', f0: 330, f1: 220, dur: 0.32, gain: 0.1, delay: 0.3 });
         break;
       case 'crash':
         // Noise burst falling in pitch + a low sawtooth drop.

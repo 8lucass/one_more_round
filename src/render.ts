@@ -3,6 +3,7 @@
 
 import { BIG_CORE_POINTS, COUNTDOWN, CORE_POINTS, FADE_IN, LOOKAHEAD, RUN_DURATION, SPEED } from './config.ts';
 import type { Sim, SimEvent, SimObject, Stats } from './sim.ts';
+import { breakdownText, closingPageCount, type Closing } from './story.ts';
 import type { Banner } from './track.ts';
 
 // ── Logical screen + camera ──────────────────────────────────────────
@@ -97,14 +98,15 @@ export interface Button {
   h: number;
 }
 
-export function resultButtons(canRematch: boolean): Button[] {
-  const bw = 250;
+/** `nextClock` = the fictional time the rematch would be played at (shown on its button). */
+export function resultButtons(canRematch: boolean, nextClock = ''): Button[] {
   const bh = 58;
   const y = 418;
-  if (!canRematch) return [{ id: 'finish', label: 'Finish', x: CX - bw / 2, y, w: bw, h: bh }];
+  if (!canRematch) return [{ id: 'finish', label: 'Finish', x: CX - 125, y, w: 250, h: bh }];
+  const rematch = nextClock ? `One more round · ${nextClock}` : 'One more round';
   return [
-    { id: 'rematch', label: 'One more round', x: CX - bw - 14, y, w: bw, h: bh },
-    { id: 'finish', label: 'Finish', x: CX + 14, y, w: bw, h: bh },
+    { id: 'rematch', label: rematch, x: CX - 14 - 330, y, w: 330, h: bh },
+    { id: 'finish', label: 'Finish', x: CX + 14, y, w: 250, h: bh },
   ];
 }
 
@@ -125,11 +127,15 @@ export interface View {
   touch: boolean; // last input was touch: say "tap" instead of "press ENTER"
   reducedMotion: boolean; // prefers-reduced-motion: no shake, no flicker, no pulsing
   muted: boolean;
+  clock: string; // fictional time of the current round ("10:30 PM")
+  nextClock: string; // fictional time of a rematch ("11:00 PM")
+  closing: Closing | null; // closing text (summary, cards, end page)
+  closingPage: number; // 0 = summary, 1..3 = cards, 4 = end page
 }
 
 // ── Effects ──────────────────────────────────────────────────────────
 interface Popup {
-  kind: 'score' | 'crash' | 'close';
+  kind: 'score' | 'pending' | 'crash' | 'close';
   text: string;
   sub: string;
   color: string;
@@ -194,13 +200,33 @@ export class Renderer {
           const big = e.obj.kind === 'bigCore';
           // Only the latest score popup is shown, so quick pickups don't stack up.
           this.popups = this.popups.filter((p) => p.kind !== 'score');
-          this.addPopup('score', `+${e.points}`, `STREAK ${e.streak}`, big ? COL.big : COL.core, laneX(e.obj.lane), big ? 1.3 : 0.7);
-          this.burst(laneX(e.obj.lane), big ? COL.big : COL.core, big ? 36 : 18, big ? 1.4 : 1);
-          this.streakPulse = 1;
           if (big) {
-            this.flash = 0.35;
-            this.flashColor = COL.big;
+            // Bank on clear: the +500 is not in the score until its barrier is passed.
+            this.addPopup('pending', `+${BIG_CORE_POINTS}?`, 'GET OUT CLEAN', COL.big, laneX(e.obj.lane), 1.1);
+            this.burst(laneX(e.obj.lane), COL.big, 20, 1.1);
+          } else {
+            this.addPopup('score', `+${e.points}`, `STREAK ${e.streak}`, COL.core, laneX(e.obj.lane), 0.7);
+            this.burst(laneX(e.obj.lane), COL.core, 18, 1);
           }
+          this.streakPulse = 1;
+          break;
+        }
+        case 'bank': {
+          // Shown where the ship is now (it has left the +500's lane).
+          const x = Math.round(this.shipX);
+          this.popups = this.popups.filter((p) => p.kind !== 'pending' && p.kind !== 'score');
+          this.addPopup('score', `BANKED +${e.points}`, 'CLEAN ESCAPE', COL.big, x, 1.3);
+          this.burst(x, COL.big, 36, 1.4);
+          this.flash = 0.35;
+          this.flashColor = COL.big;
+          break;
+        }
+        case 'lose': {
+          // The crash popup of the same step carries the loss: one message, not two.
+          this.popups = this.popups.filter((p) => p.kind !== 'pending');
+          const crash = this.popups.find((p) => p.kind === 'crash' && p.age === 0);
+          if (crash) crash.sub = `LOST +${e.points} · STREAK RESET`;
+          else this.addPopup('crash', `LOST +${e.points}`, '', COL.barrier, laneX(e.obj.lane), 1.2);
           break;
         }
         case 'crash':
@@ -821,6 +847,13 @@ export class Renderer {
     ctx.fillStyle = COL.text;
     ctx.font = `800 34px ${FONT}`;
     ctx.fillText(String(s.score), 28, 36);
+    if (sim.pendingBonus > 0) {
+      // A grabbed +500 waits here until its barrier is passed (bank on clear).
+      const w = ctx.measureText(String(s.score)).width;
+      ctx.fillStyle = COL.big;
+      ctx.font = `800 20px ${FONT}`;
+      ctx.fillText(`+${sim.pendingBonus}?`, 28 + w + 10, 46);
+    }
 
     ctx.textAlign = 'right';
     ctx.fillStyle = COL.dim;
@@ -851,6 +884,8 @@ export class Renderer {
     ctx.font = `700 13px ${FONT}`;
     const label = view.round > 1 ? `ROUND ${view.round} · LAST ROUND` : `ROUND ${view.round}`;
     ctx.fillText(label, CX, 38);
+    ctx.fillStyle = COL.warn;
+    ctx.fillText(view.clock, CX, 56);
     ctx.restore();
   }
 
@@ -923,17 +958,20 @@ export class Renderer {
     ctx.textBaseline = 'middle';
     ctx.fillStyle = COL.text;
     ctx.font = `900 64px ${FONT}`;
-    ctx.fillText('ONE MORE ROUND', CX, 112);
+    ctx.fillText('ONE MORE ROUND', CX, 100);
     ctx.fillStyle = COL.dim;
     ctx.font = `600 18px ${FONT}`;
-    ctx.fillText('A 30-second run through the tunnel', CX, 158);
+    ctx.fillText('A 30-second run through the tunnel', CX, 144);
+    ctx.fillStyle = COL.warn;
+    ctx.font = `700 17px ${FONT}`;
+    ctx.fillText(`${view.clock} · School tomorrow`, CX, 172);
 
-    drawKeyHint(ctx, CX, 226);
+    drawKeyHint(ctx, CX, 232);
 
     // Legend.
     const items: [string, string, string][] = [
       ['core', `Core  +${CORE_POINTS}`, 'Builds your streak'],
-      ['big', `High-value core  +${BIG_CORE_POINTS}`, 'Often guarded'],
+      ['big', `High-value core  +${BIG_CORE_POINTS}`, 'Counts only if you escape its barrier'],
       ['barrier', 'Barrier', 'Crash = streak reset'],
     ];
     items.forEach(([kind, label, sub], i) => {
@@ -1049,6 +1087,9 @@ export class Renderer {
     ctx.globalAlpha = a;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
+    ctx.fillStyle = COL.warn;
+    ctx.font = `700 16px ${FONT}`;
+    ctx.fillText(`${view.clock} · School tomorrow`, CX, 34);
     ctx.fillStyle = COL.dim;
     ctx.font = `800 20px ${FONT}`;
     ctx.fillText(`ROUND ${view.results.length} COMPLETE`, CX, 64);
@@ -1075,7 +1116,8 @@ export class Renderer {
     const rows: [string, string][] = [
       ['Best streak', String(s.bestStreak)],
       ['Cores', `${s.cores - s.bigCores} / ${s.coresTotal - s.bigCoresTotal}`],
-      [`+${BIG_CORE_POINTS} cores`, `${s.bigCores} / ${s.bigCoresTotal}`],
+      // Bank on clear: banked = counted, let pass = never grabbed, lost = grabbed then crashed.
+      [`+${BIG_CORE_POINTS} cores`, breakdownText(s)],
       ['Crashes', String(s.crashes)],
     ];
     rows.forEach(([k, v], i) => {
@@ -1090,7 +1132,7 @@ export class Renderer {
       ctx.fillText(v, CX + 14, y);
     });
 
-    const buttons = resultButtons(canRematch);
+    const buttons = resultButtons(canRematch, view.nextClock);
     buttons.forEach((b, i) => drawButton(ctx, b, i === view.selected, view.inputLocked));
     // Visible lock: a bar fills under the buttons while they ignore input.
     if (view.inputLocked) {
@@ -1119,27 +1161,107 @@ export class Renderer {
     ctx.restore();
   }
 
+  /**
+   * Closing, one page at a time (the player advances at their own pace):
+   * 0 summary of the night → 1..3 cards (FEEDBACK, DECISIONS, SLEEP) → end page.
+   */
   private drawClosing(ctx: CanvasRenderingContext2D, view: View): void {
-    this.dim(ctx, 0.7);
+    this.dim(ctx, 0.82);
+    const c = view.closing;
+    if (!c) return;
+    const pages = closingPageCount(c);
+    const page = Math.max(0, Math.min(pages - 1, view.closingPage));
+    const a = view.reducedMotion ? 1 : Math.min(1, view.screenTime * 4);
     ctx.save();
+    ctx.globalAlpha = a;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillStyle = COL.text;
-    ctx.font = `900 50px ${FONT}`;
-    ctx.fillText('THANKS FOR PLAYING', CX, 150);
-    const last = view.results[view.results.length - 1];
-    if (last) {
-      ctx.fillStyle = COL.dim;
-      ctx.font = `600 18px ${FONT}`;
-      const rounds = view.results.length === 1 ? '1 round' : `${view.results.length} rounds`;
-      ctx.fillText(`You played ${rounds} · final score ${last.score}`, CX, 205);
+
+    // Fictional clock + page dots, on every page.
+    ctx.fillStyle = COL.warn;
+    ctx.font = `700 16px ${FONT}`;
+    ctx.fillText(`${c.finalClock} · School tomorrow`, CX, 34);
+    for (let i = 0; i < pages; i++) {
+      ctx.beginPath();
+      ctx.arc(CX + (i - (pages - 1) / 2) * 22, 60, i === page ? 6 : 4, 0, Math.PI * 2);
+      ctx.fillStyle = i === page ? COL.text : 'rgba(255,255,255,0.25)';
+      ctx.fill();
     }
-    ctx.fillStyle = COL.dim;
-    ctx.font = `italic 500 15px ${FONT}`;
-    ctx.fillText('[ Provisional ending: the closing content arrives in the next iteration ]', CX, 270);
-    drawPrompt(ctx, view, view.touch ? 'Next player: tap to continue' : 'Next player: press ENTER or SPACE', 400);
+
+    const last = page === pages - 1;
+    let prompt: string;
+    if (page === 0) {
+      ctx.fillStyle = COL.text;
+      ctx.font = `900 46px ${FONT}`;
+      ctx.fillText('THANKS FOR PLAYING', CX, 128);
+      ctx.font = `700 22px ${FONT}`;
+      wrapText(ctx, c.headline, CX, 190, 760, 30);
+      ctx.fillStyle = COL.dim;
+      ctx.font = `600 17px ${FONT}`;
+      c.rounds.forEach((line, i) => ctx.fillText(line, CX, 262 + i * 30));
+      ctx.fillStyle = COL.text;
+      ctx.font = `600 18px ${FONT}`;
+      ctx.fillText('What does this have to do with the teenage brain?', CX, 352);
+      prompt = view.touch ? 'Tap: 3 short cards' : 'ENTER: 3 short cards';
+    } else if (!last) {
+      const card = c.cards[page - 1];
+      const color = card.tag === 'FEEDBACK' ? COL.big : card.tag === 'DECISIONS' ? COL.core : COL.warn;
+      ctx.fillStyle = color;
+      ctx.font = `900 18px ${FONT}`;
+      ctx.fillText(`${card.tag} · ${page} / ${c.cards.length}`, CX, 102);
+      ctx.fillStyle = COL.text;
+      ctx.font = `900 40px ${FONT}`;
+      ctx.fillText(card.title, CX, 146);
+      ctx.fillStyle = color;
+      ctx.font = `700 21px ${FONT}`;
+      ctx.fillText(card.you, CX, 198);
+      ctx.fillStyle = COL.text;
+      ctx.font = `500 22px ${FONT}`;
+      const bottom = wrapText(ctx, card.body, CX, 244, 780, 32);
+      ctx.fillStyle = COL.dim;
+      ctx.font = `italic 600 16px ${FONT}`;
+      ctx.fillText(`(${card.source})`, CX, bottom + 22);
+      const next = page < c.cards.length ? 'next card' : 'last page';
+      prompt = view.touch ? `Tap: ${next}` : `ENTER: ${next}`;
+    } else {
+      ctx.fillStyle = COL.text;
+      ctx.font = `900 34px ${FONT}`;
+      ctx.fillText('GAME DATA, NOT BRAIN DATA', CX, 112);
+      ctx.font = `600 21px ${FONT}`;
+      wrapText(ctx, c.disclaimer, CX, 160, 840, 30);
+      ctx.fillStyle = COL.laneHi;
+      ctx.font = `800 24px ${FONT}`;
+      ctx.fillText(c.question, CX, 250);
+      ctx.fillStyle = COL.dim;
+      ctx.font = `500 14px ${FONT}`;
+      ctx.fillText('Sources', CX, 300);
+      c.references.forEach((r, i) => ctx.fillText(r, CX, 322 + i * 22));
+      prompt = view.touch ? 'Next player: tap to continue' : 'Next player: press ENTER or SPACE';
+    }
+    drawPrompt(ctx, view, prompt, 432);
+    if (!view.touch && page > 0) {
+      ctx.fillStyle = COL.dim;
+      ctx.font = `500 14px ${FONT}`;
+      ctx.fillText('← back', CX, 482);
+    }
     ctx.restore();
   }
+}
+
+/** Centred word wrap. Returns the y of the last line drawn. */
+function wrapText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, maxW: number, lh: number): number {
+  const lines: string[] = [];
+  let line = '';
+  for (const w of text.split(' ')) {
+    const tryLine = line ? `${line} ${w}` : w;
+    if (line && ctx.measureText(tryLine).width > maxW) {
+      lines.push(line);
+      line = w;
+    } else line = tryLine;
+  }
+  if (line) lines.push(line);
+  lines.forEach((l, i) => ctx.fillText(l, x, y + i * lh));
+  return y + (lines.length - 1) * lh;
 }
 
 /**

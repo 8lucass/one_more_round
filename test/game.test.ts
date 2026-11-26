@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { BIG_CORE_POINTS, CORE_POINTS, LANES, LOOKAHEAD, RUN_DURATION } from '../src/config.ts';
+import { BIG_CORE_POINTS, CORE_POINTS, LANES, LOOKAHEAD, RUN_DURATION, SIM_DT } from '../src/config.ts';
 import { Sim } from '../src/sim.ts';
-import { riskPairs, TRACK } from '../src/track.ts';
+import { riskPairs, TRACK, type TrackItem } from '../src/track.ts';
 import { play, plan } from './planner.ts';
 
 const barriers = TRACK.filter((o) => o.kind === 'barrier');
@@ -88,6 +88,7 @@ test('RISKY ESCAPE with human reaction time: press 0.35 s after collecting', () 
     assert.equal(sim.stats.bigCores, 1, `collected at ${core.t}s`);
     assert.equal(sim.stats.score, BIG_CORE_POINTS);
     assert.equal(sim.stats.crashes, 0, `escaped at ${core.t}s`);
+    assert.equal(sim.stats.bigBanked, 1, 'escaped cleanly: the +500 is banked');
   }
 });
 
@@ -97,6 +98,98 @@ test('RISKY ESCAPE too late: pressing after the barrier arrives is a crash', () 
     assert.equal(sim.stats.bigCores, 1);
     assert.equal(sim.stats.crashes, 1);
     assert.equal(sim.stats.streak, 0, 'streak reset by the crash');
+    assert.equal(sim.stats.bigLost, 1, 'crashed into its barrier: the +500 is lost');
+    assert.equal(sim.stats.score, 0, 'a lost +500 adds nothing');
+  }
+});
+
+// ── P09 "bank on clear": the +500 counts only after a clean escape ───
+/** Plays a local slice of the course and returns the stats plus the event log. */
+function playLog(inputs: { t: number; dir: -1 | 1 }[], track: readonly TrackItem[], startLane: number) {
+  const sim = new Sim(track);
+  sim.lane = startLane;
+  const log: { type: string; t: number; score: number }[] = [];
+  let k = 0;
+  while (!sim.finished) {
+    while (k < inputs.length && inputs[k].t <= sim.time + 1e-9) sim.move(inputs[k++].dir);
+    sim.step(SIM_DT);
+    for (const e of sim.drainEvents()) log.push({ type: e.type, t: sim.time, score: sim.stats.score });
+  }
+  return { stats: sim.stats, log };
+}
+
+test('BANK ON CLEAR: grab and escape → +500 reaches the score only when its barrier passes', () => {
+  for (const { core, barrier } of riskPairs()) {
+    const sim = new Sim([core, barrier]);
+    sim.lane = core.lane;
+    const escapeDir = core.lane === 0 ? 1 : -1;
+    let moved = false;
+    let pendingSeen = false;
+    const types: string[] = [];
+    while (!sim.finished) {
+      if (!moved && sim.time >= core.t + 0.35) moved = sim.move(escapeDir);
+      sim.step(SIM_DT);
+      for (const e of sim.drainEvents()) {
+        types.push(e.type);
+        if (e.type === 'collect') assert.equal(e.points, 0, 'collecting a +500 adds nothing yet');
+        if (e.type === 'bank') assert.ok(sim.time >= barrier.t, `banked at ${sim.time.toFixed(3)} s, barrier at ${barrier.t} s`);
+      }
+      if (sim.time > core.t + 0.1 && sim.time < barrier.t) {
+        assert.equal(sim.stats.score, 0, 'pending: not in the score yet');
+        assert.equal(sim.pendingBonus, BIG_CORE_POINTS, 'pending: shown as +500?');
+        pendingSeen = true;
+      }
+    }
+    assert.ok(pendingSeen);
+    assert.deepEqual(types.filter((t) => t !== 'move'), ['collect', 'dodge', 'bank', 'finish']);
+    assert.equal(sim.stats.score, BIG_CORE_POINTS);
+    assert.equal(sim.pendingBonus, 0);
+  }
+});
+
+test('BANK ON CLEAR: grab and crash → the +500 is lost in the same step as the crash', () => {
+  for (const { core, barrier } of riskPairs()) {
+    const { stats, log } = playLog([], [core, barrier], core.lane);
+    const crash = log.find((e) => e.type === 'crash')!;
+    const lose = log.find((e) => e.type === 'lose')!;
+    assert.ok(crash && lose, `crash and lose at ${core.t}s`);
+    assert.equal(lose.t, crash.t, 'lost in the same step as the crash');
+    assert.ok(!log.some((e) => e.type === 'bank'));
+    assert.deepEqual([stats.score, stats.bigCores, stats.bigBanked, stats.bigLost, stats.crashes], [0, 1, 0, 1, 1]);
+  }
+});
+
+test('BANK ON CLEAR: letting the +500 pass → no bonus event, nothing grabbed', () => {
+  for (const { core, barrier } of riskPairs()) {
+    const other = core.lane === 0 ? 1 : 0;
+    const { stats, log } = playLog([], [core, barrier], other);
+    assert.ok(!log.some((e) => e.type === 'bank' || e.type === 'lose' || e.type === 'collect'));
+    assert.deepEqual([stats.score, stats.bigCores, stats.bigBanked, stats.bigLost, stats.crashes], [0, 0, 0, 0, 0]);
+  }
+});
+
+// What each choice is worth at each +500 (the slice of course around the pair:
+// the +500, its barrier and the normal cores of the safe lane next to it).
+//   let pass         → take the safe lane's normal cores
+//   grab and escape  → +500 banked, safe-lane cores missed
+//   grab and crash   → +500 lost, safe-lane cores missed, crash + streak reset
+test('P09 CHOICES: letting the +500 pass beats grabbing it and crashing; a clean escape beats both', () => {
+  for (const { core, barrier } of riskPairs()) {
+    const slice = TRACK.filter((o) => o.t >= core.t - 0.6 && o.t <= barrier.t + 0.3);
+    // The safe lane is the one with the normal cores (and no barrier) beside the +500.
+    const safeLane = slice.find((o) => o.kind === 'core' && !slice.some((b) => b.kind === 'barrier' && b.lane === o.lane))!.lane;
+    const escapeDir = core.lane === 0 ? 1 : -1;
+    const letPass = playLog([], slice, safeLane).stats;
+    const escape = playLog([{ t: core.t + 0.35, dir: escapeDir }], slice, core.lane).stats;
+    const crash = playLog([], slice, core.lane).stats;
+    assert.equal(escape.crashes, 0);
+    assert.equal(crash.crashes, 1);
+    assert.equal(letPass.crashes, 0);
+    assert.ok(escape.score > letPass.score, `escape ${escape.score} > let pass ${letPass.score}`);
+    assert.ok(letPass.score > crash.score, `let pass ${letPass.score} > grab and crash ${crash.score}`);
+    console.log(
+      `    +500 at ${core.t}s: let pass ${letPass.score}, grab+escape ${escape.score}, grab+crash ${crash.score} (+ crash, streak reset)`,
+    );
   }
 });
 

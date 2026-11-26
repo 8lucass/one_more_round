@@ -1,17 +1,24 @@
 // End-to-end check in a real (headless) Chromium, loading dist/index.html
-// straight from disk (file://), with the network blocked. Plays four full
-// rounds in real time with the scripted routes (~4 minutes):
-//   Player 1, round 1: safe route (1800) → results lock + held ENTER
-//   Player 1, round 2: "One more round" → risky route (3100), no tutorials
-//   Finish → closing → ENTER → next player
-//   Player 2, round 1: mixed route (2400) with focus-loss pauses → Finish
-//                      (mouse) → closing → 45 s idle → title
-//   Player 3, round 1: passive (1300) → Escape on results → title
+// straight from disk (file://), with the network blocked. Plays five full
+// rounds in real time with the scripted routes (~5 minutes):
+//   Player 1, round 1: safe route (1800) at 10:30 PM → results lock + held ENTER
+//   Player 1, round 2: "One more round · 11:00 PM" → risky route (3100), no
+//                      tutorials, +500? pending then banked
+//   Finish → closing at 11:00 PM: summary → 3 cards → end page (← back, blur
+//            ignored) → ENTER → next player
+//   Player 2, round 1: mixed route (1900: 1 banked, 1 let pass, 1 lost) with
+//                      focus-loss pauses → Finish (mouse) → closing at 10:30 PM
+//                      → cards by mouse → 45 s idle → title
+//   Player 3, round 1: passive (800) → Escape on results → title
 //   Player 4: Escape from countdown / playing / paused, live key checks, M
+//   Player 5, round 1: passive → Finish → closing card → Escape → title
 //   Touch phone (emulated) with reduced motion: "Tap to play", tap lanes, no shake
 // Key presses are dispatched as keydown events at the planned course times.
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+//   OMR_STANDALONE=1 → plays dist/one-more-round.html copied alone to a temp
+//                      folder outside the project (P04: the single-file build).
+import { copyFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { route } from './routes.ts';
@@ -19,9 +26,19 @@ import { route } from './routes.ts';
 // Use the project's playwright if installed, otherwise a global one (NODE_PATH).
 const { chromium } = createRequire(import.meta.url)('playwright');
 
-const OUT = 'test-output';
+const STANDALONE = !!process.env.OMR_STANDALONE;
+const OUT = STANDALONE ? 'test-output/standalone' : 'test-output';
 mkdirSync(OUT, { recursive: true });
-const url = pathToFileURL(resolve(process.env.OMR_PAGE || 'dist/index.html')).href;
+let pagePath = resolve(process.env.OMR_PAGE || 'dist/index.html');
+if (STANDALONE) {
+  // The single file alone, in a folder that has no game.js next to it.
+  const dir = mkdtempSync(join(tmpdir(), 'omr-standalone-'));
+  pagePath = join(dir, 'one-more-round.html');
+  copyFileSync(resolve('dist/one-more-round.html'), pagePath);
+  console.log(`Standalone file: ${pagePath}`);
+}
+const url = pathToFileURL(pagePath).href;
+const fileRequests = new Set();
 
 const browser = await chromium.launch();
 const errors = [];
@@ -41,6 +58,7 @@ async function openPage(options) {
     return r.abort();
   });
   const page = await context.newPage();
+  page.on('request', (r) => r.url().startsWith('file:') && fileRequests.add(r.url()));
   page.on('pageerror', (e) => errors.push(String(e)));
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
   await page.goto(url);
@@ -109,9 +127,34 @@ async function playRound(inputs, { frames = {}, checkpoints = [] } = {}) {
 function checkRoute(r, name) {
   const e = route(name).expected;
   check(
-    r.score === e.score && r.crashes === e.crashes && r.cores - r.bigCores === e.normalCores && r.bigCores === e.bigCores,
-    `${name} route: score ${r.score} (expected ${e.score}), crashes ${r.crashes}, cores ${r.cores - r.bigCores}/18, +500 ${r.bigCores}/3`,
+    r.score === e.score &&
+      r.crashes === e.crashes &&
+      r.cores - r.bigCores === e.normalCores &&
+      r.bigCores === e.bigCores &&
+      r.bigBanked === e.bigBanked &&
+      r.bigLost === e.bigLost,
+    `${name} route: score ${r.score} (expected ${e.score}), crashes ${r.crashes}, cores ${r.cores - r.bigCores}/18, ` +
+      `+500: ${r.bigBanked} banked · ${r.bigCoresTotal - r.bigCores} let pass · ${r.bigLost} lost`,
   );
+}
+
+/** Walks the closing pages with `next` and returns the card tag seen on each page. */
+async function walkClosing(next, shotPrefix) {
+  const seen = [];
+  for (;;) {
+    await waitUnlocked();
+    const s = await snap();
+    if (s.screen !== 'closing') break;
+    seen.push(s.closing.card);
+    if (shotPrefix) {
+      await page.waitForTimeout(300);
+      await shot(`${shotPrefix}-${s.closing.page}-${s.closing.card}`);
+    }
+    if (s.closing.page === s.closing.pages - 1) break;
+    await next();
+    await page.waitForFunction((p) => window.omr.snapshot().closing?.page === p + 1, s.closing.page, { timeout: 3000, polling: 20 });
+  }
+  return seen;
 }
 
 await shot('01-title');
@@ -125,6 +168,7 @@ await page.keyboard.press('Enter');
 s = await snap();
 check(s.screen === 'countdown' && s.audio === 'running', `ENTER starts the countdown and the audio (${s.audio})`);
 check(s.banner === null, 'round 1 countdown: no rematch banner');
+check(s.clock === '10:30 PM', `round 1 clock: ${s.clock}`);
 await page.waitForTimeout(300);
 await shot('02-countdown');
 console.log('Player 1, round 1 — safe route');
@@ -158,6 +202,7 @@ await shot('05-results-round1');
 let r = s.results[0];
 checkRoute(r, 'safe');
 check(s.buttons.join() === 'rematch,finish' && s.selected === 0, `buttons: ${s.buttons.join(', ')}`);
+check(s.clock === '10:30 PM', `results of round 1 still at ${s.clock} (the clock only moves on the rematch)`);
 await page.keyboard.press('ArrowRight');
 const selRight = (await snap()).selected;
 await page.keyboard.press('ArrowLeft');
@@ -168,17 +213,27 @@ await page.keyboard.press('Enter'); // "One more round" is focused
 await waitScreen('countdown', 3000);
 s = await snap();
 check(s.round === 2 && s.time === 0, 'rematch restarts the same course from 0 (round 2)');
+check(s.clock === '11:00 PM', `choosing one more round moves the clock to ${s.clock}`);
 check(s.banner === 'SAME TUNNEL · BEAT 1800', `rematch countdown shows the target (${s.banner})`);
 console.log('Player 1, round 2 — risky route');
 const r2Banners = [];
+const bank = [];
 await playRound(route('risky').inputs, {
-  frames: { '06-round2-at-1.0s': 1.0, '07-big-core-grab-17.96': 17.96, '08-escape-close-18.80': 18.8 },
+  frames: { '06-round2-at-1.0s': 1.0, '07-big-core-grab-17.96': 17.96, '07b-pending-18.30': 18.3, '08-banked-close-18.80': 18.8 },
   checkpoints: [
     { t: 1.0, run: async () => r2Banners.push((await snap()).banner) },
     { t: 9.5, run: async () => r2Banners.push((await snap()).banner) },
     { t: 15.5, run: async () => r2Banners.push((await snap()).banner) },
+    // c(18.0, left) is collected at ~17.92 s, the +500 when entering the centre at 18.0 s.
+    { t: 18.1, run: async () => bank.push((await snap()).stats.score) },
+    { t: 18.3, run: async () => bank.push((await snap()).stats.score, (await snap()).pendingBonus) },
+    { t: 18.9, run: async () => bank.push((await snap()).stats.score, (await snap()).pendingBonus) },
   ],
 });
+check(
+  bank[1] === bank[0] && bank[2] === 500 && bank[3] === bank[0] + 500 && bank[4] === 0,
+  `+500 A: score ${bank[0]} → ${bank[1]} with +${bank[2]}? pending → ${bank[3]} banked after its barrier`,
+);
 check(r2Banners[0] === 'SAME TUNNEL · BEAT 1800', `round 2 at 1 s: "${r2Banners[0]}"`);
 check(r2Banners[1] === null && r2Banners[2] === null, `round 2: no tutorial banners (${r2Banners.slice(1).join(', ')})`);
 await waitScreen('results');
@@ -197,16 +252,35 @@ check(s.buttons.join() === 'finish', `only one rematch: buttons now = ${s.button
 await page.keyboard.press('ArrowRight');
 await page.keyboard.press('Enter');
 await waitScreen('closing', 3000);
-await page.waitForTimeout(300);
-await shot('10-closing');
-check(true, 'Finish → closing screen');
+s = await snap();
+check(
+  s.closing.finalClock === '11:00 PM' && s.closing.headline === 'You chose one more round at 10:30 PM and finished at 11:00 PM.',
+  `closing after the rematch: "${s.closing.headline}"`,
+);
+// A blur on the closing screen does not pause anything.
+await blur();
+check((await snap()).screen === 'closing', 'blur on the closing screen: stays on the closing');
+// ENTER inside the page lock does not skip a page.
+await page.keyboard.press('Enter');
+check((await snap()).closing.page === 0, 'ENTER during the 0.6 s lock does not skip the summary');
+const pages1 = await walkClosing(() => page.keyboard.press('Enter'), '10-closing-rematch');
+check(pages1.join() === 'summary,FEEDBACK,DECISIONS,SLEEP,end', `rematch route pages: ${pages1.join(' → ')}`);
+// ← goes back one page; → on the last page does not start the next player.
+await page.keyboard.press('ArrowLeft');
+s = await snap();
+check(s.closing.card === 'SLEEP', `← on the end page → back to ${s.closing.card}`);
+await waitUnlocked();
+await page.keyboard.press('ArrowRight');
+await waitUnlocked();
+await page.keyboard.press('ArrowRight');
+s = await snap();
+check(s.screen === 'closing' && s.closing.card === 'end', '→ on the end page stays there');
 
 // ── Next player ──────────────────────────────────────────────────────
-await waitUnlocked();
 await page.keyboard.press('Enter');
 await waitScreen('title', 3000);
 s = await snap();
-check(s.round === 1 && s.results.length === 0, 'closing → fresh title for the next player');
+check(s.round === 1 && s.results.length === 0 && s.clock === '10:30 PM', 'end page ENTER → fresh title for the next player, clock back to 10:30 PM');
 
 // ── Player 2: mixed route, pauses on focus loss ──────────────────────
 await waitUnlocked();
@@ -282,10 +356,23 @@ const ox = (box.width - 960 * scale) / 2;
 const oy = (box.height - 540 * scale) / 2;
 await page.mouse.click(box.x + ox + (480 + 14 + 125) * scale, box.y + oy + (418 + 29) * scale);
 await waitScreen('closing', 3000);
-check(true, 'mouse click on Finish after round 1 → closing');
+s = await snap();
+check(
+  s.closing.finalClock === '10:30 PM' && s.closing.headline === 'You chose Finish at 10:30 PM, after one round.',
+  `mouse click on Finish after round 1 → closing: "${s.closing.headline}"`,
+);
+// The cards also advance with the mouse (a click anywhere = next page).
+const click = () => page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+const pages2 = await walkClosing(click, '15b-closing-finish');
+check(pages2.join() === 'summary,FEEDBACK,DECISIONS,SLEEP,end', `Finish route pages (mouse): ${pages2.join(' → ')}`);
+await page.keyboard.press('ArrowLeft');
+await waitUnlocked();
+await page.keyboard.press('ArrowLeft');
+s = await snap();
+check(s.closing.card === 'DECISIONS' && s.closing.you === 'You banked 1, let 1 pass, lost 1.', `DECISIONS card: "${s.closing.you}"`);
 
 // Nobody touches the closing screen: back to the title after 45 s.
-console.log('Idle on the closing screen (45 s)');
+console.log('Idle on a closing card (45 s)');
 const idleStart = Date.now();
 await page.waitForFunction(() => window.omr.snapshot().idleLeft <= 5, null, { timeout: 50000, polling: 100 });
 await shot('16-idle-warning');
@@ -349,8 +436,27 @@ await page.keyboard.press('Escape');
 s = await snap();
 check(s.screen === 'title' && s.round === 1 && s.results.length === 0, 'Escape while playing → title');
 
+// ── Player 5: passive → Finish → closing card → Escape ───────────────
+console.log('Player 5, round 1 — passive, then Escape on a closing card');
+await waitUnlocked();
+await page.keyboard.press('Enter');
+await playRound(route('passive').inputs);
+await waitScreen('results');
+await waitUnlocked();
+await page.keyboard.press('ArrowRight');
+await page.keyboard.press('Enter');
+await waitScreen('closing', 3000);
+await waitUnlocked();
+await page.keyboard.press('Enter');
+await waitUnlocked();
 s = await snap();
-const needed = ['move', 'bump', 'collect', 'big', 'crash', 'close', 'miss', 'tick', 'go', 'finish', 'menuMove', 'confirm'];
+check(s.closing.card === 'FEEDBACK', `closing → first card (${s.closing.card})`);
+await page.keyboard.press('Escape');
+s = await snap();
+check(s.screen === 'title' && s.round === 1 && s.results.length === 0, 'Escape on a closing card → title, round 1, no results');
+
+s = await snap();
+const needed = ['move', 'bump', 'collect', 'big', 'bank', 'lose', 'crash', 'close', 'miss', 'tick', 'go', 'finish', 'menuMove', 'confirm'];
 const missing = needed.filter((id) => !s.sounds[id]);
 check(missing.length === 0, `every sound was triggered (${needed.map((id) => `${id} ${s.sounds[id] ?? 0}`).join(', ')})`);
 
@@ -377,6 +483,9 @@ await shot('19-phone-crash-reduced-motion', phone);
 check(phoneShake === 0, `reduced motion: the crash does not move the camera (${phoneShake} px)`);
 
 check(errors.length === 0, `no page errors, no network requests${errors.length ? ': ' + errors.join(' | ') : ''}`);
+const files = [...fileRequests].map((u) => u.split('/').pop());
+const allowed = STANDALONE ? ['one-more-round.html'] : ['index.html', 'game.js'];
+check(files.every((f) => allowed.includes(f)), `local files loaded: ${[...new Set(files)].join(', ')}`);
 await browser.close();
 console.log(failures ? `\n${failures} check(s) FAILED` : '\nAll end-to-end checks passed');
 process.exit(failures ? 1 : 0);
