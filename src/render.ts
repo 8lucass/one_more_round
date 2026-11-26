@@ -1,9 +1,13 @@
 // Canvas 2D renderer: 2.5D tunnel seen from behind the ship, plus HUD and
-// menu screens. Placeholder art: the goal is legibility, not final looks.
+// menu screens. Direction A "10:30 PM": the menus show the bedroom around the
+// monitor (scene.ts) and the camera zooms into its screen when a round starts.
+// The tunnel gains light and colour phase by phase; cores (cyan), +500 cores
+// (gold) and barriers (red stripes) keep their colours all the way.
 
 import { BIG_CORE_POINTS, COUNTDOWN, CORE_POINTS, FADE_IN, LOOKAHEAD, RUN_DURATION, SPEED } from './config.ts';
+import { drawLedClock, drawRoomBack, drawRoomFront, FULL, lerpRect, PAL, roomTransform, SCREEN, type RoomState, type Shot } from './scene.ts';
 import type { Sim, SimEvent, SimObject, Stats } from './sim.ts';
-import { breakdownText, closingPageCount, type Closing } from './story.ts';
+import { breakdownText, clockAt, closingPageCount, type Closing } from './story.ts';
 import type { Banner } from './track.ts';
 
 // ── Logical screen + camera ──────────────────────────────────────────
@@ -26,26 +30,82 @@ const CORE_Y = 0.3;
 const FONT = '"Segoe UI", system-ui, -apple-system, Roboto, Helvetica, Arial, sans-serif';
 
 const COL = {
-  bg: '#04050d',
-  floorNear: '#1a2140',
-  floorFar: '#070914',
-  wall: '#0d1126',
-  ceiling: '#080a18',
-  ring: '#4d6bff',
-  lane: '#8fa6ff',
-  laneHi: '#47e7ff',
+  bg: PAL.night,
+  floorNear: '#1a1f42',
+  floorFar: '#070915',
+  ceiling: '#080a1a',
+  lane: '#9aa3d6',
+  // Active lane: cream, so it never reads as a (cyan) core.
+  laneHi: PAL.cream,
   core: '#47e7ff',
   big: '#ffc933',
   barrier: '#ff3b3b',
   barrierDark: '#3a0a0a',
-  ship: '#e9f1ff',
-  text: '#f2f5ff',
-  dim: '#8c95b8',
+  ship: PAL.cream,
+  text: '#f6f1e6',
+  dim: '#9aa1c6',
   close: '#9dff8a',
   missed: '#5d6482',
   missedEdge: '#a3a9c2',
-  warn: '#ffd37a',
+  warn: PAL.amber,
+  accent: PAL.cream,
+  led: PAL.led,
 };
+
+// ── Tunnel mood (P14): light and colour build up phase by phase ─────
+type RGB = [number, number, number];
+interface Mood {
+  ring: RGB;
+  ringA: number;
+  glow: RGB;
+  wall: RGB;
+  streak: number; // 0..1 light streaks along the walls
+}
+/**
+ * Keyframes at the start of each part of the course (track.ts): cores only,
+ * barriers, +500 decisions, final stretch. The blend finishes as each part
+ * starts, together with its banner. Ring colours avoid cyan, gold and red.
+ */
+const MOODS: [number, Mood][] = [
+  [0, { ring: [74, 99, 224], ringA: 0.45, glow: [35, 48, 122], wall: [13, 17, 40], streak: 0 }],
+  [9, { ring: [124, 96, 255], ringA: 0.6, glow: [58, 42, 140], wall: [17, 16, 46], streak: 0.55 }],
+  [15, { ring: [186, 104, 255], ringA: 0.7, glow: [84, 40, 150], wall: [22, 15, 50], streak: 1 }],
+  [28, { ring: [243, 233, 210], ringA: 0.75, glow: [88, 78, 150], wall: [22, 18, 48], streak: 1 }],
+];
+const MOOD_BLEND = 0.8;
+
+function moodAt(t: number): Mood {
+  let m = MOODS[0][1];
+  for (const [start, next] of MOODS) {
+    if (t < start - MOOD_BLEND) break;
+    const k = clamp01((t - (start - MOOD_BLEND)) / MOOD_BLEND);
+    m = {
+      ring: mixRgb(m.ring, next.ring, k),
+      ringA: m.ringA + (next.ringA - m.ringA) * k,
+      glow: mixRgb(m.glow, next.glow, k),
+      wall: mixRgb(m.wall, next.wall, k),
+      streak: m.streak + (next.streak - m.streak) * k,
+    };
+  }
+  return m;
+}
+
+const mixRgb = (a: RGB, b: RGB, k: number): RGB => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
+const css = (c: RGB, a = 1) => `rgba(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])},${a})`;
+
+/** Wall light streaks only exist this close to the ship: the far end, where objects appear, stays clean. */
+const STREAK_Z = 14;
+/** The finish gate is drawn once it is this close (keeps the far end clean as well). */
+const GATE_Z = 18;
+
+// ── Camera between the room and the screen ───────────────────────────
+/** Zoom into / out of the monitor (never delays input: steering only starts after the 3-2-1). */
+const ZOOM_TIME = 0.4;
+/** On "One more round" the room stays in view this long, so the clock jump is seen. */
+const REMATCH_HOLD = 0.3;
+/** The clock flips to the later time this long after choosing the rematch. */
+const CLOCK_FLIP = 0.12;
+const easeInOut = (t: number) => (t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2);
 
 /** A collected core flies into the ship for this long (hides the early pickup). */
 const MAGNET_TIME = 0.07;
@@ -100,8 +160,9 @@ export interface Button {
 
 /** `nextClock` = the fictional time the rematch would be played at (shown on its button). */
 export function resultButtons(canRematch: boolean, nextClock = ''): Button[] {
-  const bh = 58;
-  const y = 418;
+  // Inside the monitor of the desk shot (scene.ts SCREEN.desk).
+  const bh = 54;
+  const y = 350;
   if (!canRematch) return [{ id: 'finish', label: 'Finish', x: CX - 125, y, w: 250, h: bh }];
   const rematch = nextClock ? `One more round · ${nextClock}` : 'One more round';
   return [
@@ -112,6 +173,7 @@ export function resultButtons(canRematch: boolean, nextClock = ''): Button[] {
 
 export interface View {
   screen: Screen;
+  prevScreen: Screen; // the screen before this one (picks the camera move)
   screenTime: number; // seconds since entering the screen
   round: number;
   maxRounds: number;
@@ -311,20 +373,137 @@ export class Renderer {
     ctx.save();
     ctx.fillStyle = COL.bg;
     ctx.fillRect(0, 0, W, H);
+    this.shakeAmp = 0;
 
     const playingLike =
       view.screen === 'playing' || view.screen === 'finishing' || view.screen === 'countdown' || view.screen === 'paused';
-    const time = sim.time;
-    const dist = playingLike || view.screen === 'results' ? time * SPEED : this.idleClock * SPEED * 0.6;
+    const cam = this.camera(view);
 
-    this.shakeAmp = 0;
-    if (this.shake > 0 && !view.reducedMotion) {
+    if (!cam.shot || cam.k >= 1) {
+      // In the game: the screen fills the canvas.
+      this.drawWorld(ctx, sim, view);
+      if (this.flash > 0) {
+        ctx.save();
+        ctx.globalAlpha = this.flash * 0.5;
+        const g = ctx.createRadialGradient(CX, H / 2, H * 0.25, CX, H / 2, W * 0.65);
+        g.addColorStop(0, 'rgba(0,0,0,0)');
+        g.addColorStop(1, this.flashColor);
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, H);
+        ctx.restore();
+      }
+    } else {
+      // In the room: the game runs inside the monitor, which the camera may be zooming into.
+      const rect = lerpRect(SCREEN[cam.shot], FULL, cam.k);
+      const room = this.roomState(view);
+      ctx.save();
+      roomTransform(ctx, cam.shot, rect);
+      drawRoomBack(ctx, cam.shot, room);
+      ctx.restore();
+
+      ctx.save();
+      ctx.translate(rect.x, rect.y);
+      ctx.scale(rect.w / W, rect.h / H);
+      ctx.beginPath();
+      ctx.rect(0, 0, W, H);
+      ctx.clip();
+      this.drawWorld(ctx, sim, view);
+      if (view.screen === 'title') this.drawTitleScreen(ctx, view);
+      // Results and closing are read on the monitor, over the dimmed tunnel.
+      if (view.screen === 'results') ctx.fillStyle = `rgba(6,8,24,${0.86 * this.menuAlpha(view)})`;
+      if (view.screen === 'closing') ctx.fillStyle = 'rgba(6,8,24,0.86)';
+      if (view.screen === 'results' || view.screen === 'closing') ctx.fillRect(0, 0, W, H);
+      ctx.restore();
+
+      ctx.save();
+      roomTransform(ctx, cam.shot, rect);
+      drawRoomFront(ctx, cam.shot, room);
+      if (view.screen === 'title') this.drawTitle(ctx, view);
+      ctx.restore();
+    }
+    ctx.restore();
+
+    if (playingLike) {
+      ctx.save();
+      // Fade the HUD in as the camera finishes entering the screen.
+      ctx.globalAlpha = clamp01((cam.k - 0.6) / 0.4);
+      this.drawHud(ctx, sim, view);
+      if (view.banner && (view.screen === 'playing' || view.screen === 'countdown')) {
+        this.drawBanner(ctx, view.banner, view.screen === 'playing' ? sim.time : null);
+      }
+      if (view.screen === 'countdown') this.drawCountdown(ctx, view);
+      ctx.restore();
+    }
+    if (view.screen === 'paused') this.drawPaused(ctx, view);
+    if (view.screen === 'finishing') this.drawFinish(ctx, view);
+    if (view.screen === 'results') this.drawResults(ctx, view);
+    if (view.screen === 'closing') this.drawClosing(ctx, view);
+    if (view.idleLeft !== null && view.idleLeft <= view.idleWarning) this.drawIdleWarning(ctx, view);
+    this.drawSoundIcon(ctx, view);
+  }
+
+  /**
+   * Which room shot is around the screen, and how far the camera is into it
+   * (k = 0: the whole shot; k = 1: the screen fills the canvas). Reduced
+   * motion cuts instead of zooming.
+   */
+  private camera(view: View): { shot: Shot | null; k: number } {
+    const t = view.screenTime;
+    const rm = view.reducedMotion;
+    switch (view.screen) {
+      case 'title':
+        return { shot: 'wide', k: 0 };
+      case 'results':
+        // Out of the screen, back to the desk, after the round.
+        return { shot: 'desk', k: rm || view.prevScreen !== 'finishing' ? 0 : 1 - easeInOut(clamp01(t / ZOOM_TIME)) };
+      case 'closing':
+        return { shot: 'desk', k: 0 };
+      case 'countdown':
+        if (view.prevScreen === 'title') return { shot: 'wide', k: rm ? 1 : easeInOut(clamp01(t / ZOOM_TIME)) };
+        if (view.prevScreen === 'results') {
+          // One more round: the clock jumps first, then the camera goes back in.
+          if (rm) return { shot: 'desk', k: t < REMATCH_HOLD ? 0 : 1 };
+          return { shot: 'desk', k: easeInOut(clamp01((t - REMATCH_HOLD) / ZOOM_TIME)) };
+        }
+        return { shot: null, k: 1 };
+      default:
+        return { shot: null, k: 1 };
+    }
+  }
+
+  /** Alarm clock and room light. The room gets one notch darker after "One more round". */
+  private roomState(view: View): RoomState {
+    let clock = view.screen === 'closing' && view.closing ? view.closing.finalClock : view.clock;
+    let dim = view.round > 1 ? 1 : 0;
+    let clockFlash = 0;
+    if (view.screen === 'countdown' && view.prevScreen === 'results') {
+      const t = view.screenTime;
+      if (t < CLOCK_FLIP) {
+        clock = clockAt(view.round - 1);
+        dim = 0;
+      } else {
+        clockFlash = clamp01(1 - (t - CLOCK_FLIP) / 0.6);
+        dim = view.reducedMotion ? 1 : clamp01((t - CLOCK_FLIP) / 0.25);
+      }
+    }
+    return { clock, dim, clockFlash };
+  }
+
+  /** Tunnel, objects, ship and effects in the 960×540 game space (the screen). */
+  private drawWorld(ctx: CanvasRenderingContext2D, sim: Sim, view: View): void {
+    const playingLike =
+      view.screen === 'playing' || view.screen === 'finishing' || view.screen === 'countdown' || view.screen === 'paused';
+    const time = sim.time;
+    const inRun = playingLike || view.screen === 'results' || view.screen === 'closing';
+    const dist = playingLike || view.screen === 'results' ? time * SPEED : this.idleClock * SPEED * 0.6;
+    ctx.save();
+    if (this.shake > 0 && !view.reducedMotion && playingLike) {
       const a = this.shake * this.shake * 14;
       this.shakeAmp = a;
       ctx.translate((Math.random() - 0.5) * a, (Math.random() - 0.5) * a);
     }
-
-    this.drawTunnel(ctx, dist);
+    // The finish gate belongs to the run: it is not left standing behind the menus.
+    this.drawTunnel(ctx, dist, inRun ? time : 0, playingLike);
     const showWorld = view.screen !== 'title' && view.screen !== 'closing';
     if (showWorld) {
       this.drawLaneHighlight(ctx, sim.lane);
@@ -340,36 +519,12 @@ export class Renderer {
       this.drawPopups(ctx);
     }
     ctx.restore();
-
-    if (this.flash > 0) {
-      ctx.save();
-      ctx.globalAlpha = this.flash * 0.5;
-      const g = ctx.createRadialGradient(CX, H / 2, H * 0.25, CX, H / 2, W * 0.65);
-      g.addColorStop(0, 'rgba(0,0,0,0)');
-      g.addColorStop(1, this.flashColor);
-      ctx.fillStyle = g;
-      ctx.fillRect(0, 0, W, H);
-      ctx.restore();
-    }
-
-    if (playingLike) {
-      this.drawHud(ctx, sim, view);
-      if (view.banner && (view.screen === 'playing' || view.screen === 'countdown')) {
-        this.drawBanner(ctx, view.banner, view.screen === 'playing' ? time : null);
-      }
-    }
-    if (view.screen === 'countdown') this.drawCountdown(ctx, view);
-    if (view.screen === 'paused') this.drawPaused(ctx, view);
-    if (view.screen === 'finishing') this.drawFinish(ctx, view);
-    if (view.screen === 'title') this.drawTitle(ctx, view);
-    if (view.screen === 'results') this.drawResults(ctx, view);
-    if (view.screen === 'closing') this.drawClosing(ctx, view);
-    if (view.idleLeft !== null && view.idleLeft <= view.idleWarning) this.drawIdleWarning(ctx, view);
-    this.drawSoundIcon(ctx, view);
   }
 
   // ── Tunnel ─────────────────────────────────────────────────────────
-  private drawTunnel(ctx: CanvasRenderingContext2D, dist: number): void {
+  /** `t` = course time: picks the mood (colour, light, streaks) and places the finish gate. */
+  private drawTunnel(ctx: CanvasRenderingContext2D, dist: number, t: number, gate: boolean): void {
+    const mood = moodAt(t);
     const nl = proj(-HALF_W, 0, Z_NEAR);
     const nr = proj(HALF_W, 0, Z_NEAR);
     const fl = proj(-HALF_W, 0, Z_FAR);
@@ -381,7 +536,7 @@ export class Renderer {
 
     // Far end glow.
     const g0 = ctx.createRadialGradient(CX, VY, 4, CX, VY, 120);
-    g0.addColorStop(0, '#2b3a8a');
+    g0.addColorStop(0, css(mood.glow));
     g0.addColorStop(1, COL.bg);
     ctx.fillStyle = g0;
     ctx.fillRect(ftl.x - 40, ftl.y - 40, ftr.x - ftl.x + 80, fl.y - ftl.y + 80);
@@ -395,7 +550,7 @@ export class Renderer {
     ctx.fill();
 
     // Walls + ceiling.
-    ctx.fillStyle = COL.wall;
+    ctx.fillStyle = css(mood.wall);
     poly(ctx, [nl, fl, ftl, ntl]);
     ctx.fill();
     poly(ctx, [nr, fr, ftr, ntr]);
@@ -404,16 +559,51 @@ export class Renderer {
     poly(ctx, [ntl, ntr, ftr, ftl]);
     ctx.fill();
 
+    // Light streaks on the upper walls, the ceiling and the base of the walls,
+    // only near the ship: they speed past without touching the far end.
+    if (mood.streak > 0.01) {
+      ctx.strokeStyle = css(mixRgb(mood.ring, [255, 255, 255], 0.35));
+      const period = 5;
+      const len = 2.2;
+      const off = dist % period;
+      const lines: [number, number][] = [
+        [-HALF_W, 0.12],
+        [HALF_W, 0.12],
+        [-HALF_W, 1.6],
+        [HALF_W, 1.6],
+        [-HALF_W, 2.05],
+        [HALF_W, 2.05],
+        [-0.9, TUNNEL_H],
+        [0.9, TUNNEL_H],
+      ];
+      for (let z = Z_NEAR - off; z < STREAK_Z; z += period) {
+        const z0 = Math.max(Z_NEAR, z);
+        const z1 = Math.min(STREAK_Z, z + len);
+        if (z1 <= z0) continue;
+        ctx.globalAlpha = mood.streak * 0.5 * clamp01((STREAK_Z - z0) / 4);
+        for (const [x, y] of lines) {
+          const a = proj(x, y, z0);
+          const b = proj(x, y, z1);
+          ctx.lineWidth = Math.max(1, 3 * a.s);
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.stroke();
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+
     // Rings scrolling towards the camera (sense of speed).
     const off = dist % RING_SPACING;
+    ctx.strokeStyle = css(mood.ring);
     for (let z = Z_FAR - ((Z_FAR + off) % RING_SPACING); z > Z_NEAR + 0.5; z -= RING_SPACING) {
-      const a = fog(z) * 0.55;
+      const a = fog(z) * mood.ringA;
       if (a <= 0) continue;
       const p0 = proj(-HALF_W, 0, z);
       const p1 = proj(HALF_W, 0, z);
       const p2 = proj(HALF_W, TUNNEL_H, z);
       const p3 = proj(-HALF_W, TUNNEL_H, z);
-      ctx.strokeStyle = COL.ring;
       ctx.globalAlpha = a;
       ctx.lineWidth = Math.max(1, 3 * p0.s);
       ctx.beginPath();
@@ -424,6 +614,26 @@ export class Renderer {
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
+
+    // Finish gate: a cream frame the ship flies through as the round ends.
+    const gz = (RUN_DURATION - t) * SPEED + 0.6;
+    if (gate && gz < GATE_Z && gz > Z_NEAR + 0.3) {
+      const a = clamp01((GATE_Z - gz) / 4) * clamp01(gz - Z_NEAR);
+      const p0 = proj(-HALF_W + 0.05, 0, gz);
+      const p1 = proj(HALF_W - 0.05, 0, gz);
+      const p2 = proj(HALF_W - 0.05, TUNNEL_H - 0.05, gz);
+      const p3 = proj(-HALF_W + 0.05, TUNNEL_H - 0.05, gz);
+      ctx.globalAlpha = a;
+      ctx.strokeStyle = PAL.cream;
+      ctx.lineWidth = Math.max(2, 14 * p0.s);
+      ctx.beginPath();
+      ctx.moveTo(p0.x, p0.y);
+      ctx.lineTo(p3.x, p3.y);
+      ctx.lineTo(p2.x, p2.y);
+      ctx.lineTo(p1.x, p1.y);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
 
     // Lane edges (solid) and dividers (dashed, scrolling).
     ctx.fillStyle = COL.lane;
@@ -453,10 +663,10 @@ export class Renderer {
     const near = proj(x, 0, Z_NEAR);
     const far = proj(x, 0, Z_FAR);
     const g = ctx.createLinearGradient(0, near.y, 0, far.y);
-    const a = 0.22 + this.laneFlash * 0.25;
-    g.addColorStop(0, `rgba(71,231,255,${a})`);
-    g.addColorStop(0.55, `rgba(71,231,255,${a * 0.35})`);
-    g.addColorStop(1, 'rgba(71,231,255,0)');
+    const a = 0.2 + this.laneFlash * 0.25;
+    g.addColorStop(0, `rgba(243,233,210,${a})`);
+    g.addColorStop(0.55, `rgba(243,233,210,${a * 0.3})`);
+    g.addColorStop(1, 'rgba(243,233,210,0)');
     ctx.fillStyle = g;
     poly(ctx, [proj(x - 0.48, 0, Z_NEAR), proj(x + 0.48, 0, Z_NEAR), proj(x + 0.48, 0, Z_FAR), proj(x - 0.48, 0, Z_FAR)]);
     ctx.fill();
@@ -714,19 +924,36 @@ export class Renderer {
       else alpha = Math.floor((sim.time - this.crashAt) * 12) % 3 === 2 ? 0.4 : 1;
     }
     const xs = this.shipX + this.bump;
+    // Gentle hover (vertical only, so it never blurs which lane the ship is in).
+    const hover = reducedMotion ? 0 : Math.sin(this.idleClock * 2.6) * 0.016;
+    // Streak trail: a cyan wake (the cores' colour) that grows with the streak and dies on a crash.
+    const wake = clamp01((sim.stats.streak - 2) / 8);
+    if (wake > 0) this.drawWake(ctx, xs, wake);
 
     // Motion ghosts while switching lanes.
     for (let i = this.trail.length - 1; i >= 2; i -= 2) {
       const gx = this.trail[i] + this.bump;
       if (Math.abs(gx - xs) < 0.06) continue;
-      this.drawShipShape(ctx, gx, 0.18 - i * 0.02, true);
+      this.drawShipShape(ctx, gx, 0.18 - i * 0.02, true, hover, 0);
     }
-    this.drawShipShape(ctx, xs, alpha, false);
+    this.drawShipShape(ctx, xs, alpha, false, hover, wake);
   }
 
-  private drawShipShape(ctx: CanvasRenderingContext2D, x: number, alpha: number, ghost: boolean): void {
+  private drawWake(ctx: CanvasRenderingContext2D, x: number, k: number): void {
+    const near = proj(x, 0, Z_NEAR);
+    const ship = proj(x, 0, 0.1);
+    const g = ctx.createLinearGradient(0, ship.y, 0, near.y);
+    g.addColorStop(0, `rgba(71,231,255,${0.1 + 0.3 * k})`);
+    g.addColorStop(1, 'rgba(71,231,255,0)');
+    ctx.fillStyle = g;
+    const hw = 0.12 + 0.14 * k;
+    poly(ctx, [proj(x - hw, 0, 0.1), proj(x + hw, 0, 0.1), proj(x + hw * 1.6, 0, Z_NEAR), proj(x - hw * 1.6, 0, Z_NEAR)]);
+    ctx.fill();
+  }
+
+  private drawShipShape(ctx: CanvasRenderingContext2D, x: number, alpha: number, ghost: boolean, hover: number, wake: number): void {
     const base = proj(x, 0, 0);
-    const p = proj(x, 0.2, 0);
+    const p = proj(x, 0.2 + hover, 0);
     ctx.save();
     ctx.globalAlpha = alpha;
     if (!ghost) {
@@ -738,20 +965,22 @@ export class Renderer {
     ctx.translate(p.x, p.y);
     ctx.rotate(this.tilt);
 
-    // Engine glow.
+    // Engine glow: soft lavender, turning cyan and bigger with the streak.
     if (!ghost) {
+      const r = 28 + wake * 14;
+      const c = mixRgb([200, 196, 255], [71, 231, 255], wake);
       for (const ex of [-26, 26]) {
-        const g = ctx.createRadialGradient(ex, 14, 0, ex, 14, 30);
-        g.addColorStop(0, 'rgba(120,230,255,0.95)');
-        g.addColorStop(1, 'rgba(120,230,255,0)');
+        const g = ctx.createRadialGradient(ex, 14, 0, ex, 14, r);
+        g.addColorStop(0, css(c, 0.95));
+        g.addColorStop(1, css(c, 0));
         ctx.fillStyle = g;
         ctx.beginPath();
-        ctx.arc(ex, 14, 30, 0, Math.PI * 2);
+        ctx.arc(ex, 14, r, 0, Math.PI * 2);
         ctx.fill();
       }
     }
     // Hull.
-    ctx.fillStyle = ghost ? COL.laneHi : COL.ship;
+    ctx.fillStyle = COL.ship;
     ctx.beginPath();
     ctx.moveTo(-66, 12);
     ctx.lineTo(-22, -30);
@@ -762,7 +991,7 @@ export class Renderer {
     ctx.closePath();
     ctx.fill();
     if (!ghost) {
-      ctx.fillStyle = '#9aa8d6';
+      ctx.fillStyle = '#a99fc4';
       ctx.beginPath();
       ctx.moveTo(-42, 24);
       ctx.lineTo(42, 24);
@@ -771,11 +1000,11 @@ export class Renderer {
       ctx.closePath();
       ctx.fill();
       // Cockpit.
-      ctx.fillStyle = '#1b2a66';
+      ctx.fillStyle = '#1b2257';
       ctx.beginPath();
       ctx.ellipse(0, -14, 17, 9, 0, 0, Math.PI * 2);
       ctx.fill();
-      ctx.fillStyle = COL.laneHi;
+      ctx.fillStyle = '#b9c2ff';
       ctx.beginPath();
       ctx.ellipse(-4, -16, 7, 3, 0, 0, Math.PI * 2);
       ctx.fill();
@@ -786,10 +1015,10 @@ export class Renderer {
         ctx.arc(ex, 15, 8, 0, Math.PI * 2);
         ctx.fill();
       }
-      // Wing tip lights.
-      ctx.fillStyle = '#ff5a7a';
+      // Wing tip lights (amber / green: red stays for barriers).
+      ctx.fillStyle = PAL.amber;
       ctx.fillRect(-68, 8, 8, 5);
-      ctx.fillStyle = '#5aff9a';
+      ctx.fillStyle = PAL.led;
       ctx.fillRect(60, 8, 8, 5);
     }
     ctx.restore();
@@ -876,7 +1105,7 @@ export class Renderer {
     ctx.fillStyle = 'rgba(255,255,255,0.15)';
     roundRect(ctx, bx, 22, bw, 8, 4);
     ctx.fill();
-    ctx.fillStyle = COL.laneHi;
+    ctx.fillStyle = COL.accent;
     roundRect(ctx, bx, 22, Math.max(8, bw * progress), 8, 4);
     ctx.fill();
     ctx.textAlign = 'center';
@@ -884,8 +1113,8 @@ export class Renderer {
     ctx.font = `700 13px ${FONT}`;
     const label = view.round > 1 ? `ROUND ${view.round} · LAST ROUND` : `ROUND ${view.round}`;
     ctx.fillText(label, CX, 38);
-    ctx.fillStyle = COL.warn;
-    ctx.fillText(view.clock, CX, 56);
+    // The bedside clock, small: the story time of this round.
+    drawLedClock(ctx, CX, 66, 15, view.clock);
     ctx.restore();
   }
 
@@ -895,8 +1124,8 @@ export class Renderer {
     const a = Math.max(0, Math.min(1, t * 8, (1 - t) * 6));
     const color = b.tone === 'barrier' ? COL.barrier : b.tone === 'risk' ? COL.big : b.tone === 'core' ? COL.core : COL.text;
     ctx.save();
-    ctx.globalAlpha = a;
-    ctx.fillStyle = 'rgba(4,5,13,0.7)';
+    ctx.globalAlpha *= a;
+    ctx.fillStyle = 'rgba(6,8,24,0.72)';
     roundRect(ctx, CX - 300, 92, 600, 74, 12);
     ctx.fill();
     ctx.strokeStyle = color;
@@ -921,15 +1150,17 @@ export class Renderer {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     if (view.resuming) {
-      ctx.fillStyle = COL.laneHi;
+      ctx.fillStyle = COL.accent;
       ctx.font = `800 22px ${FONT}`;
       ctx.fillText('GET READY · THE ROUND CONTINUES', CX, 128);
     }
-    ctx.globalAlpha = 0.4 + frac * 0.6;
+    const base = ctx.globalAlpha;
+    ctx.globalAlpha = base * (0.4 + frac * 0.6);
     ctx.fillStyle = COL.text;
-    ctx.font = `900 ${90 + (1 - frac) * 30}px ${FONT}`;
+    // No growing numbers with reduced motion.
+    ctx.font = `900 ${view.reducedMotion ? 100 : 90 + (1 - frac) * 30}px ${FONT}`;
     ctx.fillText(String(Math.max(1, n)), CX, 200);
-    ctx.globalAlpha = 1;
+    ctx.globalAlpha = base;
     drawKeyHint(ctx, CX, 300);
     ctx.restore();
   }
@@ -951,50 +1182,88 @@ export class Renderer {
     ctx.fillRect(0, 0, W, H);
   }
 
+  /**
+   * Title, in the room (wide shot space = canvas space): the name of the game
+   * and of the project above the bedroom, the call to action on the desk.
+   * The clock (10:30 PM) and the note (School tomorrow) are props of the room.
+   */
   private drawTitle(ctx: CanvasRenderingContext2D, view: View): void {
-    this.dim(ctx, 0.55);
     ctx.save();
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
+    ctx.font = `900 60px ${FONT}`;
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 8;
+    ctx.strokeStyle = 'rgba(6,8,24,0.7)';
+    ctx.strokeText('ONE MORE ROUND', CX, 56);
     ctx.fillStyle = COL.text;
-    ctx.font = `900 64px ${FONT}`;
-    ctx.fillText('ONE MORE ROUND', CX, 100);
-    ctx.fillStyle = COL.dim;
+    ctx.fillText('ONE MORE ROUND', CX, 56);
+    ctx.fillStyle = '#b4bbe0';
     ctx.font = `600 18px ${FONT}`;
-    ctx.fillText('A 30-second run through the tunnel', CX, 144);
-    ctx.fillStyle = COL.warn;
-    ctx.font = `700 17px ${FONT}`;
-    ctx.fillText(`${view.clock} · School tomorrow`, CX, 172);
+    ctx.fillText('This Is the Teenage Brain on Video Games', CX, 100);
+    drawPrompt(ctx, view, view.touch ? 'Tap to play' : 'Press ENTER or SPACE to play', 462);
+    ctx.restore();
+  }
 
-    drawKeyHint(ctx, CX, 232);
+  /**
+   * How to play, on the monitor (960×540 screen space, shown scaled down):
+   * controls, then the three things in the tunnel.
+   */
+  private drawTitleScreen(ctx: CanvasRenderingContext2D, _view: View): void {
+    ctx.save();
+    ctx.fillStyle = 'rgba(6,8,24,0.74)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = COL.dim;
+    ctx.font = `700 30px ${FONT}`;
+    ctx.fillText('A 30-SECOND RUN THROUGH THE TUNNEL', CX, 52);
+    ctx.save();
+    ctx.translate(CX, 140);
+    ctx.scale(1.9, 1.9);
+    drawKeyHint(ctx, 0, 0);
+    ctx.restore();
 
-    // Legend.
     const items: [string, string, string][] = [
       ['core', `Core  +${CORE_POINTS}`, 'Builds your streak'],
       ['big', `High-value core  +${BIG_CORE_POINTS}`, 'Counts only if you escape its barrier'],
       ['barrier', 'Barrier', 'Crash = streak reset'],
     ];
     items.forEach(([kind, label, sub], i) => {
-      const x = CX - 280 + i * 280;
-      const y = 318;
+      const y = 262 + i * 98;
+      const x = 196;
       if (kind === 'barrier') {
         ctx.fillStyle = COL.barrier;
-        ctx.fillRect(x - 20, y - 18, 40, 34);
+        ctx.fillRect(x - 34, y - 30, 68, 60);
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(x - 34, y - 30, 68, 60);
+        ctx.clip();
+        ctx.fillStyle = COL.barrierDark;
+        for (let sx = x - 94; sx < x + 34; sx += 24) {
+          ctx.beginPath();
+          ctx.moveTo(sx, y + 30);
+          ctx.lineTo(sx + 12, y + 30);
+          ctx.lineTo(sx + 72, y - 30);
+          ctx.lineTo(sx + 60, y - 30);
+          ctx.closePath();
+          ctx.fill();
+        }
+        ctx.restore();
         ctx.strokeStyle = '#ffd0c8';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(x - 20, y - 18, 40, 34);
+        ctx.lineWidth = 4;
+        ctx.strokeRect(x - 34, y - 30, 68, 60);
       } else {
-        drawGem(ctx, x, y, kind === 'big' ? 20 : 15, kind === 'big' ? COL.big : COL.core, kind === 'big');
+        drawGem(ctx, x, y, kind === 'big' ? 36 : 28, kind === 'big' ? COL.big : COL.core, kind === 'big', 4);
       }
+      ctx.textAlign = 'left';
+      ctx.fillStyle = kind === 'big' ? COL.big : kind === 'barrier' ? '#ff8a7a' : COL.core;
+      ctx.font = `800 40px ${FONT}`;
+      ctx.fillText(label, x + 72, y - 18);
       ctx.fillStyle = COL.text;
-      ctx.font = `700 17px ${FONT}`;
-      ctx.fillText(label, x, y + 40);
-      ctx.fillStyle = COL.dim;
-      ctx.font = `500 14px ${FONT}`;
-      ctx.fillText(sub, x, y + 62);
+      ctx.font = `500 32px ${FONT}`;
+      ctx.fillText(sub, x + 72, y + 22);
     });
-
-    drawPrompt(ctx, view, view.touch ? 'Tap to play' : 'Press ENTER or SPACE to play', 460);
     ctx.restore();
   }
 
@@ -1078,38 +1347,45 @@ export class Renderer {
     ctx.restore();
   }
 
+  /** Results text fades in once the camera has pulled back to the desk. */
+  private menuAlpha(view: View): number {
+    const t = view.screenTime;
+    if (view.screen !== 'results' || view.reducedMotion || view.prevScreen !== 'finishing') return Math.min(1, t * 3);
+    return clamp01((t - ZOOM_TIME * 0.75) * 4);
+  }
+
+  /**
+   * Results, on the monitor of the desk shot (SCREEN.desk: x 80–880, y 14–464).
+   * The alarm clock in front of it shows the story time; the buttons put the
+   * rematch and its cost ("· 11:00 PM") side by side with "Finish".
+   */
   private drawResults(ctx: CanvasRenderingContext2D, view: View): void {
-    this.dim(ctx, 0.72);
     const s = view.results[view.results.length - 1];
     if (!s) return;
-    const a = Math.min(1, view.screenTime * 3);
     ctx.save();
-    ctx.globalAlpha = a;
+    ctx.globalAlpha = this.menuAlpha(view);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillStyle = COL.warn;
-    ctx.font = `700 16px ${FONT}`;
-    ctx.fillText(`${view.clock} · School tomorrow`, CX, 34);
     ctx.fillStyle = COL.dim;
     ctx.font = `800 20px ${FONT}`;
-    ctx.fillText(`ROUND ${view.results.length} COMPLETE`, CX, 64);
+    ctx.fillText(`ROUND ${view.results.length} COMPLETE`, CX, 46);
     ctx.fillStyle = COL.text;
     ctx.font = `700 16px ${FONT}`;
-    ctx.fillText('SCORE', CX, 112);
+    ctx.fillText('SCORE', CX, 82);
     ctx.font = `900 72px ${FONT}`;
-    ctx.fillText(String(s.score), CX, 160);
+    ctx.fillText(String(s.score), CX, 128);
 
     const canRematch = view.round < view.maxRounds;
     const prev = view.results.length > 1 ? view.results[view.results.length - 2] : undefined;
     if (prev) {
       const diff = s.score - prev.score;
-      ctx.font = `700 17px ${FONT}`;
-      ctx.fillStyle = diff >= 0 ? COL.core : COL.dim;
-      ctx.fillText(`Round 1: ${prev.score}   →   Round 2: ${s.score}  (${diff >= 0 ? '+' : ''}${diff})`, CX, 208);
+      ctx.font = `700 18px ${FONT}`;
+      ctx.fillStyle = diff >= 0 ? COL.warn : COL.dim;
+      ctx.fillText(`Round 1: ${prev.score}   →   Round 2: ${s.score}  (${diff >= 0 ? '+' : ''}${diff})`, CX, 180);
     } else if (canRematch) {
-      ctx.font = `800 20px ${FONT}`;
-      ctx.fillStyle = COL.laneHi;
-      ctx.fillText(`Same tunnel. Beat ${s.score}?`, CX, 208);
+      ctx.font = `800 21px ${FONT}`;
+      ctx.fillStyle = COL.warn;
+      ctx.fillText(`Same tunnel. Beat ${s.score}?`, CX, 180);
     }
 
     // Normal and +500 cores are counted separately (no double counting).
@@ -1121,14 +1397,14 @@ export class Renderer {
       ['Crashes', String(s.crashes)],
     ];
     rows.forEach(([k, v], i) => {
-      const y = 250 + i * 34;
+      const y = 218 + i * 31;
       ctx.textAlign = 'right';
       ctx.fillStyle = COL.dim;
-      ctx.font = `600 20px ${FONT}`;
+      ctx.font = `600 19px ${FONT}`;
       ctx.fillText(k, CX - 14, y);
       ctx.textAlign = 'left';
-      ctx.fillStyle = i === 0 ? COL.core : COL.text;
-      ctx.font = `800 22px ${FONT}`;
+      ctx.fillStyle = i === 0 ? COL.core : i === 2 ? COL.big : COL.text;
+      ctx.font = `800 21px ${FONT}`;
       ctx.fillText(v, CX + 14, y);
     });
 
@@ -1148,7 +1424,7 @@ export class Renderer {
     }
     ctx.textAlign = 'center';
     ctx.fillStyle = COL.dim;
-    ctx.font = `500 14px ${FONT}`;
+    ctx.font = `500 15px ${FONT}`;
     const hint =
       buttons.length > 1
         ? view.touch
@@ -1157,92 +1433,92 @@ export class Renderer {
         : view.touch
           ? 'This was your last round · tap Finish'
           : 'This was your last round · ENTER to finish';
-    ctx.fillText(hint, CX, 502);
+    ctx.fillText(hint, CX, 434);
     ctx.restore();
   }
 
   /**
-   * Closing, one page at a time (the player advances at their own pace):
+   * Closing, one page at a time (the player advances at their own pace), on
+   * the monitor of the desk shot; the alarm clock shows the final time:
    * 0 summary of the night → 1..3 cards (FEEDBACK, DECISIONS, SLEEP) → end page.
    */
   private drawClosing(ctx: CanvasRenderingContext2D, view: View): void {
-    this.dim(ctx, 0.82);
     const c = view.closing;
     if (!c) return;
     const pages = closingPageCount(c);
     const page = Math.max(0, Math.min(pages - 1, view.closingPage));
     const a = view.reducedMotion ? 1 : Math.min(1, view.screenTime * 4);
+    const maxW = 720;
     ctx.save();
     ctx.globalAlpha = a;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
-    // Fictional clock + page dots, on every page.
-    ctx.fillStyle = COL.warn;
-    ctx.font = `700 16px ${FONT}`;
-    ctx.fillText(`${c.finalClock} · School tomorrow`, CX, 34);
+    // Page dots, on every page.
     for (let i = 0; i < pages; i++) {
       ctx.beginPath();
-      ctx.arc(CX + (i - (pages - 1) / 2) * 22, 60, i === page ? 6 : 4, 0, Math.PI * 2);
+      ctx.arc(CX + (i - (pages - 1) / 2) * 22, 36, i === page ? 6 : 4, 0, Math.PI * 2);
       ctx.fillStyle = i === page ? COL.text : 'rgba(255,255,255,0.25)';
       ctx.fill();
     }
 
     const last = page === pages - 1;
     let prompt: string;
+    const promptY = 384;
     if (page === 0) {
       ctx.fillStyle = COL.text;
-      ctx.font = `900 46px ${FONT}`;
-      ctx.fillText('THANKS FOR PLAYING', CX, 128);
+      ctx.font = `900 44px ${FONT}`;
+      ctx.fillText('THANKS FOR PLAYING', CX, 90);
+      ctx.fillStyle = COL.warn;
       ctx.font = `700 22px ${FONT}`;
-      wrapText(ctx, c.headline, CX, 190, 760, 30);
+      const bottom = wrapText(ctx, c.headline, CX, 146, maxW, 30);
       ctx.fillStyle = COL.dim;
       ctx.font = `600 17px ${FONT}`;
-      c.rounds.forEach((line, i) => ctx.fillText(line, CX, 262 + i * 30));
+      c.rounds.forEach((line, i) => ctx.fillText(line, CX, bottom + 52 + i * 28));
       ctx.fillStyle = COL.text;
-      ctx.font = `600 18px ${FONT}`;
-      ctx.fillText('What does this have to do with the teenage brain?', CX, 352);
+      ctx.font = `600 19px ${FONT}`;
+      ctx.fillText('What does this have to do with the teenage brain?', CX, 302);
       prompt = view.touch ? 'Tap: 3 short cards' : 'ENTER: 3 short cards';
     } else if (!last) {
       const card = c.cards[page - 1];
-      const color = card.tag === 'FEEDBACK' ? COL.big : card.tag === 'DECISIONS' ? COL.core : COL.warn;
+      const color = card.tag === 'FEEDBACK' ? COL.big : card.tag === 'DECISIONS' ? COL.core : COL.led;
       ctx.fillStyle = color;
       ctx.font = `900 18px ${FONT}`;
-      ctx.fillText(`${card.tag} · ${page} / ${c.cards.length}`, CX, 102);
+      ctx.fillText(`${card.tag} · ${page} / ${c.cards.length}`, CX, 76);
       ctx.fillStyle = COL.text;
-      ctx.font = `900 40px ${FONT}`;
-      ctx.fillText(card.title, CX, 146);
+      ctx.font = `900 38px ${FONT}`;
+      ctx.fillText(card.title, CX, 116);
       ctx.fillStyle = color;
       ctx.font = `700 21px ${FONT}`;
-      ctx.fillText(card.you, CX, 198);
+      ctx.fillText(card.you, CX, 164);
       ctx.fillStyle = COL.text;
       ctx.font = `500 22px ${FONT}`;
-      const bottom = wrapText(ctx, card.body, CX, 244, 780, 32);
+      const bottom = wrapText(ctx, card.body, CX, 208, maxW, 31);
       ctx.fillStyle = COL.dim;
       ctx.font = `italic 600 16px ${FONT}`;
-      ctx.fillText(`(${card.source})`, CX, bottom + 22);
+      ctx.fillText(`(${card.source})`, CX, bottom + 34);
       const next = page < c.cards.length ? 'next card' : 'last page';
       prompt = view.touch ? `Tap: ${next}` : `ENTER: ${next}`;
     } else {
       ctx.fillStyle = COL.text;
       ctx.font = `900 34px ${FONT}`;
-      ctx.fillText('GAME DATA, NOT BRAIN DATA', CX, 112);
+      ctx.fillText('GAME DATA, NOT BRAIN DATA', CX, 84);
       ctx.font = `600 21px ${FONT}`;
-      wrapText(ctx, c.disclaimer, CX, 160, 840, 30);
-      ctx.fillStyle = COL.laneHi;
+      const bottom = wrapText(ctx, c.disclaimer, CX, 130, maxW, 30);
+      ctx.fillStyle = COL.warn;
       ctx.font = `800 24px ${FONT}`;
-      ctx.fillText(c.question, CX, 250);
+      ctx.fillText(c.question, CX, bottom + 54);
       ctx.fillStyle = COL.dim;
       ctx.font = `500 14px ${FONT}`;
-      ctx.fillText('Sources', CX, 300);
-      c.references.forEach((r, i) => ctx.fillText(r, CX, 322 + i * 22));
+      ctx.fillText('Sources', CX, bottom + 100);
+      c.references.forEach((r, i) => ctx.fillText(r, CX, bottom + 122 + i * 21));
       prompt = view.touch ? 'Next player: tap to continue' : 'Next player: press ENTER or SPACE';
     }
-    drawPrompt(ctx, view, prompt, 432);
+    drawPrompt(ctx, view, prompt, promptY);
     if (!view.touch && page > 0) {
       ctx.fillStyle = COL.dim;
-      ctx.font = `500 14px ${FONT}`;
-      ctx.fillText('← back', CX, 482);
+      ctx.font = `500 15px ${FONT}`;
+      ctx.fillText('← back', CX, 436);
     }
     ctx.restore();
   }
@@ -1265,24 +1541,27 @@ function wrapText(ctx: CanvasRenderingContext2D, text: string, x: number, y: num
 }
 
 /**
- * Call to action on a pill. Pulses gently between 0.7 and 1.0 opacity (steady
- * with reduced motion); stays faint while the screen still ignores input.
+ * Call to action on a pill. The outline breathes gently (steady with reduced
+ * motion); the whole pill stays faint while the screen still ignores input.
  */
 function drawPrompt(ctx: CanvasRenderingContext2D, view: View, text: string, y: number): void {
   ctx.save();
-  const pulse = view.reducedMotion ? 1 : 0.85 + 0.15 * Math.sin(view.screenTime * 4);
-  ctx.globalAlpha = view.inputLocked ? 0.35 : pulse;
+  // The text stays steady; only the outline breathes (and not at all with reduced motion).
+  const pulse = view.reducedMotion ? 1 : 0.6 + 0.4 * (0.5 + 0.5 * Math.sin(view.screenTime * 4));
+  ctx.globalAlpha = view.inputLocked ? 0.35 : 1;
   ctx.font = `800 24px ${FONT}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   const w = ctx.measureText(text).width + 56;
   roundRect(ctx, CX - w / 2, y - 26, w, 52, 26);
-  ctx.fillStyle = 'rgba(71,231,255,0.12)';
+  ctx.fillStyle = 'rgba(6,8,24,0.85)';
   ctx.fill();
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = COL.laneHi;
+  ctx.fillStyle = 'rgba(243,233,210,0.14)';
+  ctx.fill();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = `rgba(243,233,210,${pulse})`;
   ctx.stroke();
-  ctx.fillStyle = COL.laneHi;
+  ctx.fillStyle = COL.accent;
   ctx.fillText(text, CX, y + 1);
   ctx.restore();
 }
@@ -1302,10 +1581,10 @@ function drawButton(ctx: CanvasRenderingContext2D, b: Button, focused: boolean, 
   ctx.save();
   ctx.globalAlpha *= locked ? 0.5 : 1;
   roundRect(ctx, b.x, b.y, b.w, b.h, 12);
-  ctx.fillStyle = focused ? COL.laneHi : 'rgba(255,255,255,0.08)';
+  ctx.fillStyle = focused ? COL.accent : 'rgba(255,255,255,0.07)';
   ctx.fill();
   ctx.lineWidth = 2;
-  ctx.strokeStyle = focused ? '#ffffff' : 'rgba(255,255,255,0.35)';
+  ctx.strokeStyle = focused ? '#ffffff' : 'rgba(243,233,210,0.35)';
   ctx.stroke();
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -1342,10 +1621,10 @@ function drawKeyHint(ctx: CanvasRenderingContext2D, x: number, y: number): void 
   ctx.fillText('(touch: tap left / right half)', x, y + 14);
 }
 
-function drawGem(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, color: string, star: boolean): void {
+function drawGem(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, color: string, star: boolean, lw = 2): void {
   ctx.fillStyle = color;
   ctx.strokeStyle = '#fff';
-  ctx.lineWidth = 2;
+  ctx.lineWidth = lw;
   ctx.beginPath();
   const n = star ? 16 : 4;
   for (let i = 0; i < n; i++) {

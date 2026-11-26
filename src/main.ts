@@ -34,6 +34,7 @@ const sfx = new Sfx();
 const dodges = new DodgeTracker();
 
 let screen: Screen = 'title';
+let prevScreen: Screen = 'title'; // picks the camera move between room and screen
 let screenTime = 0;
 let round = 1;
 let sim = new Sim();
@@ -54,6 +55,7 @@ const reducedMotionQuery = media('(prefers-reduced-motion: reduce)');
 let touchUI = !!media('(hover: none) and (pointer: coarse)')?.matches;
 
 function go(next: Screen): void {
+  prevScreen = screen;
   screen = next;
   screenTime = 0;
   lastInput = performance.now();
@@ -108,6 +110,7 @@ function confirmResults(): void {
   sfx.play('confirm');
   if (b.id === 'rematch') {
     round++; // the fictional clock moves 30 min later only here
+    sfx.play('clock'); // the bedside clock jumps (seen in the room before the camera goes in)
     startRound();
   } else {
     closing = closingFor(results);
@@ -295,6 +298,7 @@ function view(): View {
   const lock = lockFor(screen);
   return {
     screen,
+    prevScreen,
     screenTime,
     round,
     maxRounds: MAX_ROUNDS,
@@ -348,6 +352,8 @@ requestAnimationFrame(frame);
     results: results.map((r) => ({ ...r })),
     selected,
     buttons: screen === 'results' ? resultButtons(round < MAX_ROUNDS).map((b) => b.id) : [],
+    // Where the result buttons are drawn (logical 960×540 px), so tests can click them.
+    buttonRects: screen === 'results' ? resultButtons(round < MAX_ROUNDS).map(({ id, x, y, w, h }) => ({ id, x, y, w, h })) : [],
     clock: clockAt(round),
     pendingBonus: sim.pendingBonus,
     closing:

@@ -354,7 +354,8 @@ const box = await page.locator('#game').boundingBox();
 const scale = Math.min(box.width / 960, box.height / 540);
 const ox = (box.width - 960 * scale) / 2;
 const oy = (box.height - 540 * scale) / 2;
-await page.mouse.click(box.x + ox + (480 + 14 + 125) * scale, box.y + oy + (418 + 29) * scale);
+const fin = s.buttonRects.find((r) => r.id === 'finish');
+await page.mouse.click(box.x + ox + (fin.x + fin.w / 2) * scale, box.y + oy + (fin.y + fin.h / 2) * scale);
 await waitScreen('closing', 3000);
 s = await snap();
 check(
@@ -456,7 +457,7 @@ s = await snap();
 check(s.screen === 'title' && s.round === 1 && s.results.length === 0, 'Escape on a closing card → title, round 1, no results');
 
 s = await snap();
-const needed = ['move', 'bump', 'collect', 'big', 'bank', 'lose', 'crash', 'close', 'miss', 'tick', 'go', 'finish', 'menuMove', 'confirm'];
+const needed = ['move', 'bump', 'collect', 'big', 'bank', 'lose', 'crash', 'close', 'miss', 'tick', 'go', 'finish', 'menuMove', 'confirm', 'clock'];
 const missing = needed.filter((id) => !s.sounds[id]);
 check(missing.length === 0, `every sound was triggered (${needed.map((id) => `${id} ${s.sounds[id] ?? 0}`).join(', ')})`);
 

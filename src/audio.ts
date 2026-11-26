@@ -22,7 +22,8 @@ export type SoundId =
   | 'go'
   | 'finish'
   | 'menuMove'
-  | 'confirm';
+  | 'confirm'
+  | 'clock';
 
 type Wave = OscillatorType;
 
@@ -228,6 +229,11 @@ export class Sfx {
       case 'confirm':
         this.tone({ wave: 'triangle', f0: 660, dur: 0.07, gain: 0.22 });
         this.tone({ wave: 'triangle', f0: 990, dur: 0.12, gain: 0.22, delay: 0.06 });
+        break;
+      case 'clock':
+        // Mechanical double click as the bedside clock jumps 30 minutes (in sync with the picture).
+        this.noise({ dur: 0.025, gain: 0.32, filter: 'highpass', f0: 3200, delay: 0.12 });
+        this.noise({ dur: 0.03, gain: 0.26, filter: 'bandpass', f0: 1800, q: 4, delay: 0.17 });
         break;
     }
   }

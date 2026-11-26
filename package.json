@@ -1,8 +1,8 @@
 {
   "name": "one-more-round",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "One More Round — playable prototype, phase 2 (TypeScript + Canvas 2D)",
+  "description": "One More Round — gallery walk version, phase 3 (TypeScript + Canvas 2D)",
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",

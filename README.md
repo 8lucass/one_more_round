@@ -1,7 +1,7 @@
-# One More Round — prototipo jugable 2 (fase 2, «La decisión cuenta»)
+# One More Round — versión para el gallery walk (fase 3, «Identidad 10:30 PM»)
 
-Arcade de ~30 s para el la clase de psicologia. TypeScript + Canvas 2D, sin dependencias en tiempo de ejecución.
-Gráficos provisionales: esta iteración se centra en el control, la distancia de visión y el tiempo de reacción.
+Arcade de ~30 s para la clase de psicología. TypeScript + Canvas 2D, sin dependencias en tiempo de ejecución ni archivos externos (sin imágenes ni fuentes).
+Dirección artística A, «10:30 PM»: un dormitorio de noche (ventana con luna, escritorio, monitor, despertador LED y nota «School tomorrow!») enmarca la partida y la decisión de repetir. Paleta azul noche y crema con acentos ámbar y verde; el rojo con franjas queda solo para las barreras.
 
 ## Cómo abrirlo
 
@@ -29,9 +29,9 @@ Gráficos provisionales: esta iteración se centra en el control, la distancia d
 
 ## Flujo
 
-Título («10:30 PM · School tomorrow») → cuenta atrás → recorrido de 30 s → resultados (hora ficticia, puntuación, «Same tunnel. Beat N?», mejor racha, núcleos /18, desglose de los +500 «banked · let pass · lost», choques)
-→ **One more round · 11:00 PM** (una única revancha en el mismo recorrido, con «SAME TUNNEL · BEAT N» y sin tutoriales; el reloj pasa a las 11:00 PM) o **Finish**
-→ cierre: resumen de la noche → 3 tarjetas (FEEDBACK, DECISIONS, SLEEP) → «Game data, not brain data» y la pregunta del gallery walk
+Título en el dormitorio (despertador a las 10:30 PM, nota «School tomorrow!», instrucciones en el monitor) → la cámara entra en la pantalla (0,4 s, durante la cuenta atrás) → cuenta atrás → recorrido de 30 s → la cámara vuelve al escritorio → resultados en el monitor, con el despertador delante (puntuación, «Same tunnel. Beat N?», mejor racha, núcleos /18, desglose de los +500 «banked · let pass · lost», choques)
+→ **One more round · 11:00 PM** (una única revancha en el mismo recorrido, con «SAME TUNNEL · BEAT N» y sin tutoriales; el reloj pasa a las 11:00 PM) o **Finish**. Al elegir la revancha, el despertador salta a las 11:00 PM con un clic, la luz de la habitación baja un punto y la cámara vuelve a entrar.
+→ cierre en el monitor (el despertador muestra la hora final): resumen de la noche → 3 tarjetas (FEEDBACK, DECISIONS, SLEEP) → «Game data, not brain data» y la pregunta del gallery walk
 → Enter → pantalla de título para el siguiente jugador.
 
 - **+500 «bank on clear»:** al recoger un núcleo +500 aparece «+500?» (también junto a la puntuación). Solo suma si después pasas su barrera sin chocar («BANKED +500»); si chocas con ella se pierde («LOST +500»). Dejarlo pasar y coger los núcleos del carril seguro da +200 sin riesgo.
@@ -41,7 +41,8 @@ Título («10:30 PM · School tomorrow») → cuenta atrás → recorrido de 30 
 - Si la ventana pierde el foco o la pestaña se oculta durante la cuenta atrás o la ronda, el juego se pausa. Enter/toque → 3-2-1 → la ronda sigue en el mismo instante.
 - 45 s sin tocar nada en resultados, cierre (cualquier página) o pausa → vuelta al título (aviso los últimos 10 s).
 - Sonido sintetizado con WebAudio (sin archivos; funciona offline). Arranca con la primera pulsación o toque.
-- Con `prefers-reduced-motion: reduce` no hay sacudida de cámara, ni parpadeo de la nave, ni pulso en los avisos.
+- **Túnel por fases (solo presentación):** azul en los núcleos, violeta desde las barreras (9 s), orquídea en los +500 (15 s) y crema en el tramo final (28 s), con vetas de luz en las paredes, puerta de meta, nave que flota y estela cian que crece con la racha (desaparece al chocar). Nada nuevo se dibuja al fondo del túnel, donde aparecen los objetos.
+- Con `prefers-reduced-motion: reduce` no hay sacudida de cámara, ni parpadeo de la nave, ni pulso en los avisos, ni zoom (corte directo), ni flotación de la nave.
 
 ## Recorrido fijo (`src/track.ts`)
 
@@ -71,7 +72,7 @@ npm run test:e2e:standalone   # lo mismo con dist/one-more-round.html copiado so
 - `test/routes.test.ts`: las 4 rutas guionizadas de `test/routes.ts` dan exactamente pasiva 800, segura 1800, mixta 1900 y arriesgada 3100 (también con 17 ms de retraso), con su desglose de +500.
 - `test/story.test.ts`: reloj 10:30 / 11:00 PM; desglose banked + let pass + lost = 3 en cada ruta; las dos rutas (Finish directo y revancha) llegan a las 3 tarjetas; cada tarjeta ≤ 40 palabras, sin verbos de medición, solo fuentes cotejadas, «adult» en la de dopamina y «This clock is fictional» en la de sueño.
 - `test/feedback.test.ts`: «CLOSE!» solo en esquivas ajustadas (presentación, no toca la simulación).
-- `test/e2e.mjs`: abre `dist/index.html` desde disco con la red bloqueada y juega las 4 rutas: segura → bloqueo de resultados y Enter mantenido → revancha arriesgada sin tutoriales («+500?» pendiente y luego banked) → Finish → cierre a las 11:00 PM con las 5 páginas, ←, → y blur → Enter → mixta con pausas por pérdida de foco (también durante el 3-2-1) y pestaña oculta simulada → Finish con el ratón tras la ronda 1 → cierre a las 10:30 PM recorrido con clics → 45 s inactivo en una tarjeta → pasiva → Esc en resultados → Esc en cuenta atrás, partida y pausa → pasiva → Finish → Esc en una tarjeta. Comprueba teclado real, borde, tecla mantenida, M, que suenan los 14 sonidos, qué archivos locales se cargan, y un móvil emulado con táctil y reduced motion. Deja capturas en `test-output/` (`test-output/standalone/` con `OMR_STANDALONE=1`).
+- `test/e2e.mjs`: abre `dist/index.html` desde disco con la red bloqueada y juega las 4 rutas: segura → bloqueo de resultados y Enter mantenido → revancha arriesgada sin tutoriales («+500?» pendiente y luego banked) → Finish → cierre a las 11:00 PM con las 5 páginas, ←, → y blur → Enter → mixta con pausas por pérdida de foco (también durante el 3-2-1) y pestaña oculta simulada → Finish con el ratón tras la ronda 1 → cierre a las 10:30 PM recorrido con clics → 45 s inactivo en una tarjeta → pasiva → Esc en resultados → Esc en cuenta atrás, partida y pausa → pasiva → Finish → Esc en una tarjeta. Comprueba teclado real, borde, tecla mantenida, M, que suenan los 15 sonidos (incluido el clic del despertador), qué archivos locales se cargan, y un móvil emulado con táctil y reduced motion. Deja capturas en `test-output/` (`test-output/standalone/` con `OMR_STANDALONE=1`).
 
 Las rutas se calculan con un planificador (`test/planner.ts`) que limita los cambios de carril a uno cada 0,15 s.
 
@@ -81,7 +82,8 @@ Las rutas se calculan con un planificador (`test/planner.ts`) que limita los cam
 src/config.ts   ajustes de juego (y de presentación: bloqueos, inactividad, volumen, reloj)
 src/track.ts    recorrido fijo y mensajes de fase (tutoriales en ronda 1, objetivo en la revancha)
 src/sim.ts      simulación determinista (sin DOM)
-src/render.ts   túnel 2.5D, HUD y pantallas
+src/render.ts   túnel 2.5D por fases, HUD, pantallas y cámara entre el cuarto y el monitor
+src/scene.ts    dormitorio (plano general y del escritorio), despertador LED, nota, ventana
 src/story.ts    reloj ficticio y texto del cierre (resumen, 3 tarjetas, aviso, fuentes)
 src/main.ts     pantallas, entrada, pausa, inactividad y bucle de paso fijo (120 Hz)
 src/audio.ts    efectos de sonido sintetizados (WebAudio)
