@@ -1,6 +1,6 @@
 # One More Round — prototipo jugable 1
 
-Arcade de ~30 s para el gallery walk. TypeScript + Canvas 2D, sin dependencias en tiempo de ejecución.
+Arcade de ~30 s para el la clase de psicologia. TypeScript + Canvas 2D, sin dependencias en tiempo de ejecución.
 Gráficos provisionales: esta iteración se centra en el control, la distancia de visión y el tiempo de reacción.
 
 ## Cómo abrirlo
