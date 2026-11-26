@@ -192,7 +192,7 @@ export interface View {
   clock: string; // fictional time of the current round ("10:30 PM")
   nextClock: string; // fictional time of a rematch ("11:00 PM")
   closing: Closing | null; // closing text (summary, cards, end page)
-  closingPage: number; // 0 = summary, 1..3 = cards, 4 = end page
+  closingPage: number; // 0 = "Your run", 1 = "What this has to do with your brain"
 }
 
 // ── Effects ──────────────────────────────────────────────────────────
@@ -1438,9 +1438,10 @@ export class Renderer {
   }
 
   /**
-   * Closing, one page at a time (the player advances at their own pace), on
-   * the monitor of the desk shot; the alarm clock shows the final time:
-   * 0 summary of the night → 1..3 cards (FEEDBACK, DECISIONS, SLEEP) → end page.
+   * Closing, two pages at the player's pace, on the monitor of the desk shot
+   * (x 80–880, y 14–464); the alarm clock shows the final time:
+   * 0 "Your run" → 1 "What this has to do with your brain" (Reward, Decisions,
+   * Sleep timing) → ENTER: next player.
    */
   private drawClosing(ctx: CanvasRenderingContext2D, view: View): void {
     const c = view.closing;
@@ -1448,79 +1449,104 @@ export class Renderer {
     const pages = closingPageCount(c);
     const page = Math.max(0, Math.min(pages - 1, view.closingPage));
     const a = view.reducedMotion ? 1 : Math.min(1, view.screenTime * 4);
-    const maxW = 720;
     ctx.save();
     ctx.globalAlpha = a;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
-    // Page dots, on every page.
+    // Page dots, on both pages.
     for (let i = 0; i < pages; i++) {
       ctx.beginPath();
-      ctx.arc(CX + (i - (pages - 1) / 2) * 22, 36, i === page ? 6 : 4, 0, Math.PI * 2);
+      ctx.arc(CX + (i - (pages - 1) / 2) * 22, 34, i === page ? 6 : 4, 0, Math.PI * 2);
       ctx.fillStyle = i === page ? COL.text : 'rgba(255,255,255,0.25)';
       ctx.fill();
     }
 
-    const last = page === pages - 1;
     let prompt: string;
-    const promptY = 384;
     if (page === 0) {
-      ctx.fillStyle = COL.text;
-      ctx.font = `900 44px ${FONT}`;
-      ctx.fillText('THANKS FOR PLAYING', CX, 90);
-      ctx.fillStyle = COL.warn;
-      ctx.font = `700 22px ${FONT}`;
-      const bottom = wrapText(ctx, c.headline, CX, 146, maxW, 30);
-      ctx.fillStyle = COL.dim;
-      ctx.font = `600 17px ${FONT}`;
-      c.rounds.forEach((line, i) => ctx.fillText(line, CX, bottom + 52 + i * 28));
-      ctx.fillStyle = COL.text;
-      ctx.font = `600 19px ${FONT}`;
-      ctx.fillText('What does this have to do with the teenage brain?', CX, 302);
-      prompt = view.touch ? 'Tap: 3 short cards' : 'ENTER: 3 short cards';
-    } else if (!last) {
-      const card = c.cards[page - 1];
-      const color = card.tag === 'FEEDBACK' ? COL.big : card.tag === 'DECISIONS' ? COL.core : COL.led;
-      ctx.fillStyle = color;
-      ctx.font = `900 18px ${FONT}`;
-      ctx.fillText(`${card.tag} · ${page} / ${c.cards.length}`, CX, 76);
-      ctx.fillStyle = COL.text;
-      ctx.font = `900 38px ${FONT}`;
-      ctx.fillText(card.title, CX, 116);
-      ctx.fillStyle = color;
-      ctx.font = `700 21px ${FONT}`;
-      ctx.fillText(card.you, CX, 164);
-      ctx.fillStyle = COL.text;
-      ctx.font = `500 22px ${FONT}`;
-      const bottom = wrapText(ctx, card.body, CX, 208, maxW, 31);
-      ctx.fillStyle = COL.dim;
-      ctx.font = `italic 600 16px ${FONT}`;
-      ctx.fillText(`(${card.source})`, CX, bottom + 34);
-      const next = page < c.cards.length ? 'next card' : 'last page';
-      prompt = view.touch ? `Tap: ${next}` : `ENTER: ${next}`;
+      this.drawRunPage(ctx, c);
+      prompt = view.touch ? 'Tap: what about my brain?' : 'ENTER: what about my brain?';
     } else {
-      ctx.fillStyle = COL.text;
-      ctx.font = `900 34px ${FONT}`;
-      ctx.fillText('GAME DATA, NOT BRAIN DATA', CX, 84);
-      ctx.font = `600 21px ${FONT}`;
-      const bottom = wrapText(ctx, c.disclaimer, CX, 130, maxW, 30);
-      ctx.fillStyle = COL.warn;
-      ctx.font = `800 24px ${FONT}`;
-      ctx.fillText(c.question, CX, bottom + 54);
-      ctx.fillStyle = COL.dim;
-      ctx.font = `500 14px ${FONT}`;
-      ctx.fillText('Sources', CX, bottom + 100);
-      c.references.forEach((r, i) => ctx.fillText(r, CX, bottom + 122 + i * 21));
-      prompt = view.touch ? 'Next player: tap to continue' : 'Next player: press ENTER or SPACE';
+      this.drawBrainPage(ctx, c);
+      prompt = view.touch ? 'Next player: tap to start' : 'Next player: press ENTER';
     }
-    drawPrompt(ctx, view, prompt, promptY);
+    drawPrompt(ctx, view, prompt, 424, page === 1);
     if (!view.touch && page > 0) {
+      ctx.textAlign = 'left';
       ctx.fillStyle = COL.dim;
       ctx.font = `500 15px ${FONT}`;
-      ctx.fillText('← back', CX, 436);
+      ctx.fillText('← back', 112, 424);
     }
     ctx.restore();
+  }
+
+  /** "Your run": score (and the signed change after a rematch), the +500s, the final time. */
+  private drawRunPage(ctx: CanvasRenderingContext2D, c: Closing): void {
+    ctx.fillStyle = COL.text;
+    ctx.font = `900 40px ${FONT}`;
+    ctx.fillText('YOUR RUN', CX, 76);
+    ctx.fillStyle = COL.warn;
+    ctx.font = `700 21px ${FONT}`;
+    ctx.fillText(c.headline, CX, 118);
+
+    let y: number;
+    if (c.change) {
+      ctx.fillStyle = COL.text;
+      ctx.font = `800 28px ${FONT}`;
+      ctx.fillText(c.score, CX, 166);
+      ctx.fillStyle = c.change.sign > 0 ? COL.close : c.change.sign < 0 ? COL.text : COL.dim;
+      ctx.font = `900 26px ${FONT}`;
+      ctx.fillText(c.change.text, CX, 204);
+      y = 250;
+    } else {
+      ctx.fillStyle = COL.text;
+      ctx.font = `900 44px ${FONT}`;
+      ctx.fillText(c.score, CX, 178);
+      y = 238;
+    }
+
+    ctx.fillStyle = COL.text;
+    ctx.font = `500 18px ${FONT}`;
+    y = wrapText(ctx, c.bonusRule, CX, y, 680, 24) + 36;
+    ctx.fillStyle = COL.big;
+    ctx.font = `800 20px ${FONT}`;
+    c.bonusLines.forEach((line, i) => ctx.fillText(line, CX, y + i * 28));
+
+    ctx.fillStyle = COL.dim;
+    ctx.font = `500 15px ${FONT}`;
+    ctx.fillText(c.disclaimer, CX, 380);
+  }
+
+  /** Three short rows: tag + structure on the left, two sentences + citation on the right. */
+  private drawBrainPage(ctx: CanvasRenderingContext2D, c: Closing): void {
+    ctx.fillStyle = COL.text;
+    ctx.font = `900 30px ${FONT}`;
+    ctx.fillText(c.brainTitle, CX, 66);
+
+    const left = 112;
+    const textX = 300;
+    const textW = 552;
+    let y = 102;
+    for (const b of c.blocks) {
+      const color = b.tag === 'REWARD' ? COL.big : b.tag === 'DECISIONS' ? COL.core : COL.led;
+      ctx.textAlign = 'left';
+      ctx.fillStyle = color;
+      ctx.font = `900 15px ${FONT}`;
+      ctx.fillText(b.tag, left, y + 2);
+      ctx.fillStyle = COL.text;
+      ctx.font = `800 18px ${FONT}`;
+      const sEnd = wrapText(ctx, b.structure, left, y + 26, textX - left - 16, 22);
+      ctx.font = `500 16px ${FONT}`;
+      const tEnd = wrapText(ctx, b.text, textX, y + 2, textW, 21);
+      ctx.fillStyle = COL.dim;
+      ctx.font = `italic 600 13px ${FONT}`;
+      ctx.fillText(`(${b.cite})`, textX, tEnd + 19);
+      y = Math.max(sEnd, tEnd + 19) + 26;
+    }
+    ctx.textAlign = 'center';
+    ctx.fillStyle = COL.warn;
+    ctx.font = `800 20px ${FONT}`;
+    ctx.fillText(c.question, CX, Math.min(Math.max(y, 368), 378));
   }
 }
 
@@ -1544,16 +1570,17 @@ function wrapText(ctx: CanvasRenderingContext2D, text: string, x: number, y: num
  * Call to action on a pill. The outline breathes gently (steady with reduced
  * motion); the whole pill stays faint while the screen still ignores input.
  */
-function drawPrompt(ctx: CanvasRenderingContext2D, view: View, text: string, y: number): void {
+function drawPrompt(ctx: CanvasRenderingContext2D, view: View, text: string, y: number, compact = false): void {
   ctx.save();
   // The text stays steady; only the outline breathes (and not at all with reduced motion).
   const pulse = view.reducedMotion ? 1 : 0.6 + 0.4 * (0.5 + 0.5 * Math.sin(view.screenTime * 4));
   ctx.globalAlpha = view.inputLocked ? 0.35 : 1;
-  ctx.font = `800 24px ${FONT}`;
+  ctx.font = `800 ${compact ? 20 : 24}px ${FONT}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  const w = ctx.measureText(text).width + 56;
-  roundRect(ctx, CX - w / 2, y - 26, w, 52, 26);
+  const w = ctx.measureText(text).width + (compact ? 44 : 56);
+  const h = compact ? 42 : 52;
+  roundRect(ctx, CX - w / 2, y - h / 2, w, h, h / 2);
   ctx.fillStyle = 'rgba(6,8,24,0.85)';
   ctx.fill();
   ctx.fillStyle = 'rgba(243,233,210,0.14)';

@@ -51,6 +51,14 @@ export const IDLE_RESET = 45;
 /** The "back to the start in N" notice appears this many seconds before the reset. */
 export const IDLE_WARNING = 10;
 
+/**
+ * Holding ← or → this long during a round moves one more lane, so a held
+ * arrow crosses from one side to the other. The game times it (not the OS
+ * key repeat); releasing earlier cancels it. Quick taps last ~0.05–0.15 s,
+ * so they stay one press = one lane.
+ */
+export const HOLD_REPEAT = 0.2;
+
 /** A barrier dodged by leaving its lane this soon before it arrives shows "CLOSE!". */
 export const CLOSE_DODGE = 0.35;
 

@@ -3,8 +3,10 @@
 // title → countdown → playing → finishing → results
 //   results: "One more round" (once) → countdown (same course, clock +30 min)
 //            "Finish" → closing → (next player) title
-//   closing: summary → 3 cards → end page, one page per ENTER / → / tap
-//            (← goes back); ENTER on the end page → title for the next player
+//   closing: "Your run" → "What this has to do with your brain", one page per
+//            ENTER / → / tap (← goes back); ENTER on the last page → title
+//   playing: one press = one lane; holding ← / → for HOLD_REPEAT s adds one
+//            more lane (game-timed, cancelled by releasing, pausing, any screen change)
 //   playing/countdown: window loses focus or tab hidden → paused
 //            → ENTER / tap → countdown (3-2-1) → playing, same sim time
 //   Escape (any screen), or IDLE_RESET s without input in results, closing
@@ -22,6 +24,7 @@ import {
   SIM_DT,
 } from './config.ts';
 import { DodgeTracker } from './feedback.ts';
+import { HoldRepeat, type Dir } from './hold.ts';
 import { H, MUTE_BUTTON, Renderer, resultButtons, W, type Screen, type View } from './render.ts';
 import { Sim, type SimEvent, type Stats } from './sim.ts';
 import { clockAt, closingFor, closingPageCount, type Closing } from './story.ts';
@@ -32,6 +35,8 @@ const ctx = canvas.getContext('2d')!;
 const renderer = new Renderer();
 const sfx = new Sfx();
 const dodges = new DodgeTracker();
+const hold = new HoldRepeat(); // held ← / → during a round: one extra lane after HOLD_REPEAT
+const nowSec = () => performance.now() / 1000;
 
 let screen: Screen = 'title';
 let prevScreen: Screen = 'title'; // picks the camera move between room and screen
@@ -55,6 +60,7 @@ const reducedMotionQuery = media('(prefers-reduced-motion: reduce)');
 let touchUI = !!media('(hover: none) and (pointer: coarse)')?.matches;
 
 function go(next: Screen): void {
+  hold.clear(); // a key held across a screen change never moves the ship later
   prevScreen = screen;
   screen = next;
   screenTime = 0;
@@ -155,11 +161,12 @@ function feed(events: SimEvent[]): void {
   sfx.handleEvents(events, close);
 }
 
-function steer(dir: -1 | 1): void {
+function steer(dir: Dir, fromKey = false): void {
   if (screen === 'playing') {
     sim.move(dir);
     // Feedback for the press is shown (and heard) on the very next frame.
     feed(sim.drainEvents());
+    if (fromKey) hold.press(dir, nowSec());
   } else if (screen === 'results' && !locked()) {
     const n = resultButtons(round < MAX_ROUNDS).length;
     const next = Math.max(0, Math.min(n - 1, selected + dir));
@@ -170,6 +177,18 @@ function steer(dir: -1 | 1): void {
     if (dir < 0 || closingPage < closingPageCount(closing) - 1) turnPage(dir);
   }
 }
+
+function keyDir(k: string): Dir | 0 {
+  if (k === 'ArrowLeft' || k === 'a' || k === 'A') return -1;
+  if (k === 'ArrowRight' || k === 'd' || k === 'D') return 1;
+  return 0;
+}
+
+// Releasing an arrow before HOLD_REPEAT cancels its extra lane.
+window.addEventListener('keyup', (e) => {
+  const dir = keyDir(e.key);
+  if (dir) hold.release(dir);
+});
 
 window.addEventListener('keydown', (e) => {
   const k = e.key;
@@ -183,12 +202,12 @@ window.addEventListener('keydown', (e) => {
     touchUI = false;
     sfx.unlock(); // a key press is a user gesture: audio may start now
   }
-  if (k === 'ArrowLeft' || k === 'a' || k === 'A') {
+  const dir = keyDir(k);
+  if (dir) {
     e.preventDefault();
-    if (!e.repeat) steer(-1); // one press = one lane; holding does nothing
-  } else if (k === 'ArrowRight' || k === 'd' || k === 'D') {
-    e.preventDefault();
-    if (!e.repeat) steer(1);
+    // One press = one lane now. The OS key repeat is ignored: a held arrow
+    // gets its single extra lane from `hold`, timed by the game.
+    if (!e.repeat) steer(dir, true);
   } else if (k === 'Enter' || k === ' ' || k === 'Spacebar') {
     e.preventDefault();
     if (!e.repeat) confirm(); // holding ENTER never confirms twice
@@ -225,9 +244,16 @@ canvas.addEventListener('pointerdown', (e) => {
   }
 });
 
-window.addEventListener('blur', () => pause('blur'));
+// A lost focus also loses the keyup of a held arrow: drop the hold first.
+window.addEventListener('blur', () => {
+  hold.clear();
+  pause('blur');
+});
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') pause('hidden');
+  if (document.visibilityState === 'hidden') {
+    hold.clear();
+    pause('hidden');
+  }
 });
 
 // ── Canvas sizing (letterboxed 16:9, crisp on HiDPI) ─────────────────
@@ -266,6 +292,11 @@ function update(dt: number): void {
       go('playing');
     }
   } else if (screen === 'playing') {
+    const extra = hold.poll(nowSec(), sim.lane);
+    if (extra) {
+      sim.move(extra);
+      feed(sim.drainEvents());
+    }
     acc += dt;
     while (acc >= SIM_DT && !sim.finished) {
       sim.step(SIM_DT);
@@ -356,15 +387,19 @@ requestAnimationFrame(frame);
     buttonRects: screen === 'results' ? resultButtons(round < MAX_ROUNDS).map(({ id, x, y, w, h }) => ({ id, x, y, w, h })) : [],
     clock: clockAt(round),
     pendingBonus: sim.pendingBonus,
+    held: hold.held, // arrow waiting for its extra lane (0 = none)
     closing:
       screen === 'closing' && closing
         ? {
             page: closingPage,
             pages: closingPageCount(closing),
-            card: closingPage === 0 ? 'summary' : closing.cards[closingPage - 1]?.tag ?? 'end',
+            card: closingPage === 0 ? 'run' : 'brain',
             finalClock: closing.finalClock,
             headline: closing.headline,
-            you: closing.cards[closingPage - 1]?.you ?? null,
+            score: closing.score,
+            change: closing.change?.text ?? null,
+            bonusLines: closing.bonusLines,
+            blocks: closing.blocks.map((b) => b.tag),
           }
         : null,
     locked: locked(),

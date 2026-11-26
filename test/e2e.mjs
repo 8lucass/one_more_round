@@ -4,14 +4,16 @@
 //   Player 1, round 1: safe route (1800) at 10:30 PM → results lock + held ENTER
 //   Player 1, round 2: "One more round · 11:00 PM" → risky route (3100), no
 //                      tutorials, +500? pending then banked
-//   Finish → closing at 11:00 PM: summary → 3 cards → end page (← back, blur
-//            ignored) → ENTER → next player
-//   Player 2, round 1: mixed route (1900: 1 banked, 1 let pass, 1 lost) with
+//   Finish → closing at 11:00 PM: "Your run" (+1300) → brain page (← back,
+//            blur ignored) → ENTER → next player
+//   Player 2, round 1: mixed route (1900: 1 won, 1 let pass, 1 lost) with
 //                      focus-loss pauses → Finish (mouse) → closing at 10:30 PM
-//                      → cards by mouse → 45 s idle → title
+//                      → pages by mouse → 45 s idle → title
 //   Player 3, round 1: passive (800) → Escape on results → title
-//   Player 4: Escape from countdown / playing / paused, live key checks, M
-//   Player 5, round 1: passive → Finish → closing card → Escape → title
+//   Player 4: Escape from countdown / playing / paused, live key checks (tap,
+//             held arrow crossing two lanes, release before the threshold,
+//             edge, blur while holding), M
+//   Player 5, round 1: passive → Finish → brain page → Escape → title
 //   Touch phone (emulated) with reduced motion: "Tap to play", tap lanes, no shake
 // Key presses are dispatched as keydown events at the planned course times.
 //   OMR_STANDALONE=1 → plays dist/one-more-round.html copied alone to a temp
@@ -102,7 +104,9 @@ async function playRound(inputs, { frames = {}, checkpoints = [] } = {}) {
           }
           while (s.screen === 'playing' && i < inputs.length && inputs[i].t <= s.time + 0.004) {
             const key = inputs[i].dir < 0 ? 'ArrowLeft' : 'ArrowRight';
+            // A quick tap: key down and up in the same frame (a held key would add a lane).
             window.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+            window.dispatchEvent(new KeyboardEvent('keyup', { key, bubbles: true }));
             i++;
           }
           if (s.screen === 'finishing' || s.screen === 'results' || s.screen === 'title') res({ fired: i, captured });
@@ -254,27 +258,33 @@ await page.keyboard.press('Enter');
 await waitScreen('closing', 3000);
 s = await snap();
 check(
-  s.closing.finalClock === '11:00 PM' && s.closing.headline === 'You chose one more round at 10:30 PM and finished at 11:00 PM.',
+  s.closing.finalClock === '11:00 PM' && s.closing.headline === 'You played one more round and finished at 11:00 PM.',
   `closing after the rematch: "${s.closing.headline}"`,
+);
+check(
+  s.closing.change === '+1300 points' && s.closing.bonusLines.join(' | ') === 'Round 1: 0 won · 0 lost · 3 let pass | Round 2: 3 won · 0 lost · 0 let pass',
+  `"Your run": ${s.closing.score} (${s.closing.change}); ${s.closing.bonusLines.join(' | ')}`,
 );
 // A blur on the closing screen does not pause anything.
 await blur();
 check((await snap()).screen === 'closing', 'blur on the closing screen: stays on the closing');
 // ENTER inside the page lock does not skip a page.
 await page.keyboard.press('Enter');
-check((await snap()).closing.page === 0, 'ENTER during the 0.6 s lock does not skip the summary');
+check((await snap()).closing.page === 0, 'ENTER during the 0.6 s lock does not skip "Your run"');
 const pages1 = await walkClosing(() => page.keyboard.press('Enter'), '10-closing-rematch');
-check(pages1.join() === 'summary,FEEDBACK,DECISIONS,SLEEP,end', `rematch route pages: ${pages1.join(' → ')}`);
+check(pages1.join() === 'run,brain', `rematch route pages: ${pages1.join(' → ')}`);
+s = await snap();
+check(s.closing.blocks.join() === 'REWARD,DECISIONS,SLEEP TIMING', `brain page blocks: ${s.closing.blocks.join(', ')}`);
 // ← goes back one page; → on the last page does not start the next player.
 await page.keyboard.press('ArrowLeft');
 s = await snap();
-check(s.closing.card === 'SLEEP', `← on the end page → back to ${s.closing.card}`);
+check(s.closing.card === 'run', `← on the brain page → back to ${s.closing.card}`);
 await waitUnlocked();
 await page.keyboard.press('ArrowRight');
 await waitUnlocked();
 await page.keyboard.press('ArrowRight');
 s = await snap();
-check(s.screen === 'closing' && s.closing.card === 'end', '→ on the end page stays there');
+check(s.screen === 'closing' && s.closing.card === 'brain', '→ on the last page stays there');
 
 // ── Next player ──────────────────────────────────────────────────────
 await page.keyboard.press('Enter');
@@ -362,15 +372,17 @@ check(
   s.closing.finalClock === '10:30 PM' && s.closing.headline === 'You chose Finish at 10:30 PM, after one round.',
   `mouse click on Finish after round 1 → closing: "${s.closing.headline}"`,
 );
-// The cards also advance with the mouse (a click anywhere = next page).
+check(
+  s.closing.score === '1900 points' && s.closing.change === null && s.closing.bonusLines.join() === 'Your +500 cores: 1 won · 1 lost · 1 let pass',
+  `"Your run" after one round: ${s.closing.score}; ${s.closing.bonusLines.join()}`,
+);
+// The pages also advance with the mouse (a click anywhere = next page).
 const click = () => page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
 const pages2 = await walkClosing(click, '15b-closing-finish');
-check(pages2.join() === 'summary,FEEDBACK,DECISIONS,SLEEP,end', `Finish route pages (mouse): ${pages2.join(' → ')}`);
-await page.keyboard.press('ArrowLeft');
-await waitUnlocked();
+check(pages2.join() === 'run,brain', `Finish route pages (mouse): ${pages2.join(' → ')}`);
 await page.keyboard.press('ArrowLeft');
 s = await snap();
-check(s.closing.card === 'DECISIONS' && s.closing.you === 'You banked 1, let 1 pass, lost 1.', `DECISIONS card: "${s.closing.you}"`);
+check(s.closing.card === 'run', `← → back to "${s.closing.card}"`);
 
 // Nobody touches the closing screen: back to the title after 45 s.
 console.log('Idle on a closing card (45 s)');
@@ -411,13 +423,67 @@ const lane1 = (await snap()).lane;
 check(lane0 === 1 && lane1 === 0, `ArrowLeft switches lane instantly (${lane0} → ${lane1})`);
 await page.keyboard.press('ArrowLeft');
 check((await snap()).lane === 0, 'left edge blocks the move');
-await page.keyboard.down('ArrowRight'); // holding should move exactly one lane
-await page.evaluate(() => {
-  for (let i = 0; i < 5; i++) window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', repeat: true }));
-});
-await page.waitForTimeout(200);
+
+// Held arrow: the press moves one lane now; still held after HOLD_REPEAT (0.2 s) → one more lane.
+const osRepeat = (key) =>
+  page.evaluate((key) => {
+    for (let i = 0; i < 5; i++) window.dispatchEvent(new KeyboardEvent('keydown', { key, repeat: true }));
+  }, key);
+await page.keyboard.down('ArrowRight');
+s = await snap();
+const heldAtPress = s.lane;
+await page.waitForTimeout(100);
+await osRepeat('ArrowRight'); // the OS key repeat is ignored: only the game's timer counts
+const heldAt100 = (await snap()).lane;
+await page.waitForTimeout(250);
+const heldAt350 = (await snap()).lane;
+check(heldAtPress === 1 && heldAt100 === 1 && heldAt350 === 2, `hold → from the left: lane 1 at once, still 1 at 0.1 s, 2 after the threshold (${heldAtPress}, ${heldAt100}, ${heldAt350})`);
+// Still holding against the right edge: no extra move and no extra bump.
+const bumps0 = (await snap()).sounds.bump ?? 0;
+await page.waitForTimeout(300);
+await osRepeat('ArrowRight');
+s = await snap();
+check(s.lane === 2 && (s.sounds.bump ?? 0) === bumps0, `holding against the edge: no extra move, no extra bump (${bumps0} → ${s.sounds.bump ?? 0})`);
 await page.keyboard.up('ArrowRight');
-check((await snap()).lane === 1, 'holding → moves exactly one lane');
+// A press held into the edge bumps once, never again while held.
+await page.keyboard.down('ArrowRight');
+await page.waitForTimeout(400);
+await osRepeat('ArrowRight');
+await page.keyboard.up('ArrowRight');
+s = await snap();
+check(s.lane === 2 && (s.sounds.bump ?? 0) === bumps0 + 1, `press held against the edge: one bump only (${bumps0} → ${s.sounds.bump ?? 0})`);
+// Short taps: released before the threshold → exactly one lane each.
+for (const ms of [40, 100, 150]) {
+  const from = (await snap()).lane;
+  await page.keyboard.down('ArrowLeft');
+  await page.waitForTimeout(ms);
+  await page.keyboard.up('ArrowLeft');
+  await page.waitForTimeout(300);
+  s = await snap();
+  check(s.lane === from - 1 && s.held === 0, `tap of ${ms} ms → one lane (${from} → ${s.lane})`);
+  if (s.lane === 0) {
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('ArrowRight');
+  }
+}
+// Two quick independent taps still give two lanes.
+await page.keyboard.press('ArrowRight'); // 1 → 2
+await page.keyboard.press('ArrowLeft');
+await page.keyboard.press('ArrowLeft');
+check((await snap()).lane === 0, 'two quick taps ← ← → two lanes');
+// Focus lost while holding: paused, the extra lane never comes, not even after resuming.
+await page.keyboard.down('ArrowRight');
+check((await snap()).lane === 1, 'press → lane 1');
+await blur();
+await page.waitForTimeout(400);
+s = await snap();
+check(s.screen === 'paused' && s.lane === 1 && s.held === 0, `blur while holding → paused, hold dropped (lane ${s.lane}, held ${s.held})`);
+await waitUnlocked();
+await page.keyboard.press('Enter');
+await waitScreen('playing', 4000);
+await page.waitForTimeout(400);
+await page.keyboard.up('ArrowRight');
+check((await snap()).lane === 1, 'after resuming, the old hold adds no lane');
 await page.keyboard.press('m');
 s = await snap();
 check(s.muted === true, 'M mutes');
@@ -451,10 +517,10 @@ await waitUnlocked();
 await page.keyboard.press('Enter');
 await waitUnlocked();
 s = await snap();
-check(s.closing.card === 'FEEDBACK', `closing → first card (${s.closing.card})`);
+check(s.closing.card === 'brain', `closing → brain page (${s.closing.card})`);
 await page.keyboard.press('Escape');
 s = await snap();
-check(s.screen === 'title' && s.round === 1 && s.results.length === 0, 'Escape on a closing card → title, round 1, no results');
+check(s.screen === 'title' && s.round === 1 && s.results.length === 0, 'Escape on the brain page → title, round 1, no results');
 
 s = await snap();
 const needed = ['move', 'bump', 'collect', 'big', 'bank', 'lose', 'crash', 'close', 'miss', 'tick', 'go', 'finish', 'menuMove', 'confirm', 'clock'];
