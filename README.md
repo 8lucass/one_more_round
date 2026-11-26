@@ -1,93 +1,114 @@
-# One More Round — versión para el gallery walk (fase 3, «Identidad 10:30 PM»)
+# One More Round
 
-Arcade de ~30 s para la clase de psicología. TypeScript + Canvas 2D, sin dependencias en tiempo de ejecución ni archivos externos (sin imágenes ni fuentes).
-Dirección artística A, «10:30 PM»: un dormitorio de noche (ventana con luna, escritorio, monitor, despertador LED y nota «School tomorrow!») enmarca la partida y la decisión de repetir. Paleta azul noche y crema con acentos ámbar y verde; el rojo con franjas queda solo para las barreras.
+A 30-second browser arcade game about the question *"why is it so hard to stop after one more round?"*
 
-## Cómo abrirlo
+Made for the Grade 11 project **"This Is the Teenage Brain on Video Games"** and shown at a gallery walk. The game is the visual representation. A separate written explanation (APA, with references) covers the science in depth.
 
-- **Un solo archivo (para enviar por email o copiar a otro equipo):** `dist/one-more-round.html`. Lleva el juego dentro; funciona solo, desde cualquier carpeta y sin internet.
-- **Sin instalar nada:** abre `dist/index.html` con doble clic (Chrome, Edge o Firefox). Funciona desde el disco (`file://`); necesita `dist/game.js` al lado.
-- **Desde el código:**
-  ```bash
-  npm install
-  npm run dev     # http://localhost:8000 (reconstruye al guardar)
-  npm run build   # regenera dist/ (index.html + game.js + one-more-round.html)
-  ```
-  Para el gallery walk: navegador a pantalla completa (F11).
+## Try it in two minutes
 
-## Controles
+1. Download **`dist/one-more-round.html`** from this repository (open the file on GitHub and press *Download raw file*).
+2. Double-click it. It opens in Chrome, Edge or Firefox. It is a single file and needs no internet, no install and no other files.
+3. Press **Enter**, then use **← / →** (or **A / D**) to change lane. Sound is on; **M** mutes it.
+4. For the best view, use full screen (**F11**). **Esc** returns to the title screen at any time.
 
-| Tecla | Acción |
+A full play-through, including the closing screens, takes about 2 to 3 minutes.
+
+## The concept
+
+You fly a small ship down a three-lane tunnel for 30 seconds. You collect cyan **cores** (+100) and avoid red striped **barriers**.
+
+The twist is the golden **+500 core**, which always has a barrier right behind it in the same lane:
+
+- Collect it and it stays **pending** ("+500?").
+- It is **banked** only if you then get past its barrier without crashing.
+- If you crash into that barrier, the +500 is **lost** and your streak resets.
+- You can also **let it pass** and take the safe lane for a guaranteed, smaller gain.
+
+For each +500, the points work out like this:
+
+| Choice | Result |
 |---|---|
-| ← / → (o A / D) | Un carril por pulsación, al instante. Mantener la flecha 0,2 s añade **un** carril más (cruzar de un lado al otro); soltar antes lo cancela. Lo cronometra el juego, no la repetición del sistema |
-| Enter / Espacio | Empezar · confirmar · siguiente página del cierre |
-| ← / → en resultados | Elegir botón |
-| ← / → en el cierre | Página anterior / siguiente (→ no sale de la última página) |
-| Ratón / táctil | Botones; en juego, tocar mitad izquierda/derecha; en el cierre, tocar = siguiente |
-| M (o tocar el altavoz, abajo a la derecha) | Silenciar / activar el sonido |
-| Esc | Volver al título para el siguiente jugador (ronda 1, sin resultados) |
+| Let it pass | +200 (safe cores in the other lane) |
+| Collect it and escape the barrier | +500 |
+| Collect it and crash | 0, plus a crash |
 
-## Flujo
+So the tempting choice is not always the best one. Every player gets the exact same tunnel, so a score is a fair comparison.
 
-Título en el dormitorio (despertador a las 10:30 PM, nota «School tomorrow!», instrucciones en el monitor) → la cámara entra en la pantalla (0,4 s, durante la cuenta atrás) → cuenta atrás → recorrido de 30 s → la cámara vuelve al escritorio → resultados en el monitor, con el despertador delante (puntuación, «Same tunnel. Beat N?», mejor racha, núcleos /18, desglose de los +500 «banked · let pass · lost», choques)
-→ **One more round · 11:00 PM** (una única revancha en el mismo recorrido, con «SAME TUNNEL · BEAT N» y sin tutoriales; el reloj pasa a las 11:00 PM) o **Finish**. Al elegir la revancha, el despertador salta a las 11:00 PM con un clic, la luz de la habitación baja un punto y la cámara vuelve a entrar.
-→ cierre en el monitor (el despertador muestra la hora final), 2 páginas: **«Your run»** (puntuación; tras la revancha, el cambio real entre rondas con su signo; qué significa ganar, perder o dejar pasar un +500 y el recuento por ronda; aviso «game data») → **«What this has to do with your brain»** (bloques Reward · estriado, Decisions · corteza prefrontal, Sleep timing · núcleo supraquiasmático, cada uno con 2 frases y una cita autor-año; pregunta del gallery walk)
-→ Enter → pantalla de título para el siguiente jugador.
+### The "one more round" loop
 
-- **+500 «bank on clear»:** al recoger un núcleo +500 aparece «+500?» (también junto a la puntuación). Solo suma si después pasas su barrera sin chocar («BANKED +500»); si chocas con ella se pierde («LOST +500»). Dejarlo pasar y coger los núcleos del carril seguro da +200 sin riesgo.
-- **Reloj ficticio:** 10:30 PM en la ronda 1; solo elegir la revancha lo adelanta a las 11:00 PM. El cierre muestra la hora final y el bloque Sleep timing dice que el reloj es ficticio.
-- **Cierre:** cada página espera al jugador (Enter, →, clic o toque; ← vuelve). Los bloques citan Koepp et al. (1998), NIMH (2023) y NIGMS (2023); el texto vive en `src/story.ts` y se coteja en `docs/entrega/notas-revision.md`. La bibliografía completa está en la explicación escrita (`docs/entrega/`).
-- Resultados ignoran la entrada 1,2 s (barra bajo los botones); título, cada página del cierre y pausa, 0,6 s. Mantener Enter pulsado nunca confirma dos veces.
-- Si la ventana pierde el foco o la pestaña se oculta durante la cuenta atrás o la ronda, el juego se pausa. Enter/toque → 3-2-1 → la ronda sigue en el mismo instante.
-- 45 s sin tocar nada en resultados, cierre (cualquier página) o pausa → vuelta al título (aviso los últimos 10 s).
-- Sonido sintetizado con WebAudio (sin archivos; funciona offline). Arranca con la primera pulsación o toque.
-- **Túnel por fases (solo presentación):** azul en los núcleos, violeta desde las barreras (9 s), orquídea en los +500 (15 s) y crema en el tramo final (28 s), con vetas de luz en las paredes, puerta de meta, nave que flota y estela cian que crece con la racha (desaparece al chocar). Nada nuevo se dibuja al fondo del túnel, donde aparecen los objetos.
-- Con `prefers-reduced-motion: reduce` no hay sacudida de cámara, ni parpadeo de la nave, ni pulso en los avisos, ni zoom (corte directo), ni flotación de la nave.
+After round 1 the results screen offers **One more round** or **Finish**:
 
-## Recorrido fijo (`src/track.ts`)
+- The fictional clock on the alarm clock moves from **10:30 PM** to **11:00 PM** only if you choose another round.
+- Round 2 is the same tunnel, with no tutorials, and the game tells you the score to beat.
+- Only one rematch is offered. The closing screens then connect the run to the topic.
 
-| Tiempo | Fase | Contenido |
-|---|---|---|
-| 0–9 s | Núcleos | Solo núcleos normales (+100), para aprender a moverse |
-| 9–15 s | Barreras | Solo barreras (1 o 2 por fila, siempre queda un carril libre) |
-| 15–30 s | Riesgo | 3 núcleos de alto valor (+500) con una barrera 0,75 / 0,70 / 0,60 s detrás en el mismo carril. El +500 solo cuenta si pasas esa barrera sin chocar. Hay siempre un carril seguro con 2 núcleos normales |
+### The closing screens
 
-- Los objetos son visibles **3,2 s** antes de llegar a la nave; la barrera de cada par se ve ≥ 2,5 s antes de que llegue el núcleo.
-- Las barreras son más altas que la altura a la que flotan los núcleos, así que asoman por encima del núcleo dorado; además proyectan un brillo rojo en el suelo de su carril.
-- El cambio de carril es lógico e instantáneo (la colisión usa el carril nuevo desde la misma pulsación); el carril activo se ilumina al momento y la nave llega en ~0,1 s con inclinación y estela.
-- Un choque pone la racha a 0, la barrera se rompe y la nave queda 0,6 s sin colisión para evitar choques en cadena. La partida sigue.
+The game ends with two pages, read at the player's own pace:
 
-Todos los valores ajustables (velocidad, distancia de visión, ventana de recogida, puntos…) están en `src/config.ts`.
+1. **"Your run":** score, change between rounds, how many +500s were won, lost or let pass, and what the final clock time was.
+2. **"What this has to do with your brain":** three short blocks, each with a citation.
 
-## Pruebas
+| Block | Brain structure | Idea in the game | Source |
+|---|---|---|---|
+| Reward | Striatum | Game play and dopamine in the reward system | Koepp et al. (1998) |
+| Decisions | Prefrontal cortex | Judging risk is still maturing in adolescence | NIMH (2023) |
+| Sleep timing | Suprachiasmatic nucleus | The body clock and why "just one more" gets late | NIGMS (2023); NIMH (2023) |
+
+The page ends with a question for the person in front of the screen: *"What made you want to keep playing, if anything?"*
+
+## An honest framing
+
+Score, crashes, timing and the choice to play again are **game data, not brain data**. The game does not measure dopamine, brain activity or anyone's self-control. It gives the player an experience to think about, and the closing screens say so on screen. The clock is also fictional.
+
+## How the game teaches (design choices)
+
+- **No science during play.** The tunnel is for playing. The explanations appear only after the run, when the player has something to relate them to.
+- **Short and repeatable.** One round is 30 seconds, so a visitor at the gallery walk can finish quickly and the next person starts straight away (the game resets itself after 45 s without input).
+- **The setting carries the theme.** A night bedroom frames the whole game: a moon in the window, a desk and monitor, an LED alarm clock and a note that says "School tomorrow!". Choosing another round moves the clock to 11:00 PM and the room gets a little darker.
+- **Readable without sound or colour alone.** Barriers are tall and striped, cores are small and round, and a streak trail and "CLOSE!" / "CRASH!" messages give feedback. Sound effects are synthesised in the browser, so there are no audio files.
+- **Reduced motion.** With the system setting `prefers-reduced-motion`, shake, flicker and zoom are turned off.
+
+## Controls
+
+| Input | Action |
+|---|---|
+| ← / → or A / D | Move one lane per press. Holding the arrow for 0.2 s moves one extra lane |
+| Enter / Space | Start, confirm, next page |
+| ← / → on results | Choose a button |
+| ← / → on closing pages | Previous / next page |
+| Mouse / touch | Click the drawn buttons; while playing, tap the left or right half |
+| M | Mute / unmute |
+| Esc | Back to the title screen for the next player |
+
+If the window loses focus or the tab is hidden during a round, the game pauses. Press Enter to resume with a 3-2-1.
+
+## For developers
+
+TypeScript + Canvas 2D, with no runtime dependencies, images or fonts. The simulation (`src/sim.ts`) is deterministic and has no DOM, so the same code runs in the browser and in the Node tests.
 
 ```bash
-npm run typecheck   # tsc estricto
-npm test            # simulación + diseño del recorrido (Node, instantáneo)
-npm run test:e2e    # Chromium real, 5 partidas completas en tiempo real (~5 min; la primera vez: `npx playwright install chromium`)
-npm run test:e2e:standalone   # lo mismo con dist/one-more-round.html copiado solo a una carpeta temporal
+npm install
+npm run dev         # build + local server at http://localhost:8000
+npm run build       # regenerate dist/ (index.html + game.js + one-more-round.html)
+npm run typecheck   # strict tsc
+npm test            # simulation, level design, scoring routes, closing text (Node)
+npm run test:e2e    # real Chromium plays full rounds (~5 min; first time: npx playwright install chromium)
 ```
 
-- `test/game.test.ts`: fases separadas; cada fila de barreras deja carril libre; cada núcleo de alto valor tiene barrera detrás, vía de escape y carril seguro; ruta segura (0 choques, 0 núcleos dorados, 1800 pts); ruta arriesgada (3/3 núcleos dorados, 0 choques, 3100 pts); escape con 0,35 s de reacción humana (+500 banked); escape tardío = choque y +500 perdido; «bank on clear»: recoger y escapar, recoger y chocar, dejar pasar; en cada +500, dejar pasar (200) vale más que recoger y chocar (0) y escapar limpio (500) más que ambos; quedarse en el centro = choques, racha a 0 y la partida continúa; revancha determinista.
-- `test/routes.test.ts`: las 4 rutas guionizadas de `test/routes.ts` dan exactamente pasiva 800, segura 1800, mixta 1900 y arriesgada 3100 (también con 17 ms de retraso), con su desglose de +500.
-- `test/story.test.ts`: reloj 10:30 / 11:00 PM; desglose banked + let pass + lost = 3 en cada ruta; signo real del cambio (mejora, empeora, empate); «Your run» con una ronda y con revancha, incluidos 0 ganados; página del cerebro con 3 bloques de 2 frases (≤ 34 palabras) y una cita, ≤ 115 palabras en total, sin verbos de medición, solo fuentes cotejadas, «8 adult men», «evidence consistent with», «200 safe points» y «fictional clock».
-- `test/hold.test.ts`: flecha mantenida: toque breve = 1 carril; mantener ≥ 0,2 s = 1 carril más (una sola vez); soltar antes, pausa o cambio de pantalla lo cancelan; contra el borde no añade nada; dos toques rápidos = 2 carriles.
-- `test/feedback.test.ts`: «CLOSE!» solo en esquivas ajustadas (presentación, no toca la simulación).
-- `test/e2e.mjs`: abre `dist/index.html` desde disco con la red bloqueada y juega las 4 rutas: segura → bloqueo de resultados y Enter mantenido → revancha arriesgada sin tutoriales («+500?» pendiente y luego banked) → Finish → cierre a las 11:00 PM con las 2 páginas (+1300 y recuento por ronda), ←, → y blur → Enter → mixta con pausas por pérdida de foco (también durante el 3-2-1) y pestaña oculta simulada → Finish con el ratón tras la ronda 1 → cierre a las 10:30 PM recorrido con clics → 45 s inactivo en el cierre → pasiva → Esc en resultados → Esc en cuenta atrás, partida y pausa → pasiva → Finish → Esc en la página del cerebro. Comprueba teclado real, borde, toques de 40/100/150 ms (1 carril), flecha mantenida (cruza 2 carriles a los 0,2 s, ignora la repetición del sistema, contra el borde un solo `bump`), dos toques rápidos, blur con la flecha pulsada (no añade carril ni al reanudar), M, que suenan los 15 sonidos (incluido el clic del despertador), qué archivos locales se cargan, y un móvil emulado con táctil y reduced motion. Deja capturas en `test-output/` (`test-output/standalone/` con `OMR_STANDALONE=1`).
+`npm run test:e2e` and `npm run test:e2e:standalone` rewrite `dist/`, so run `npm run build` afterwards.
 
-Las rutas se calculan con un planificador (`test/planner.ts`) que limita los cambios de carril a uno cada 0,15 s.
+| File | Role |
+|---|---|
+| `src/config.ts` | Tunable values: speed, scoring, locks, volume |
+| `src/track.ts` | The fixed level and phase messages (0–9 s cores, 9–15 s barriers, 15–30 s risk) |
+| `src/sim.ts` | Deterministic simulation and scoring |
+| `src/render.ts` | Tunnel, HUD, screens and camera |
+| `src/scene.ts` | The bedroom, LED clock, note and window |
+| `src/story.ts` | Fictional clock and closing-screen text |
+| `src/hold.ts` | Held-arrow extra lane |
+| `src/main.ts` | Screen flow, input, pause, idle reset, main loop |
+| `src/audio.ts` | Synthesised sound effects |
+| `src/feedback.ts` | Close-call detection shared by graphics and sound |
 
-## Estructura
-
-```
-src/config.ts   ajustes de juego (y de presentación: bloqueos, inactividad, volumen, reloj)
-src/track.ts    recorrido fijo y mensajes de fase (tutoriales en ronda 1, objetivo en la revancha)
-src/sim.ts      simulación determinista (sin DOM)
-src/render.ts   túnel 2.5D por fases, HUD, pantallas y cámara entre el cuarto y el monitor
-src/scene.ts    dormitorio (plano general y del escritorio), despertador LED, nota, ventana
-src/story.ts    reloj ficticio y texto del cierre («Your run» y la página del cerebro)
-src/hold.ts     flecha mantenida: un carril extra tras HOLD_REPEAT (sin DOM)
-src/main.ts     pantallas, entrada, pausa, inactividad y bucle de paso fijo (120 Hz)
-src/audio.ts    efectos de sonido sintetizados (WebAudio)
-src/feedback.ts lectura de eventos compartida por render y audio (esquiva ajustada)
-```
+The tests check that the level is fair (every barrier row leaves a free lane, every +500 has an escape) and that four scripted routes give exactly 800, 1800, 1900 and 3100 points.
